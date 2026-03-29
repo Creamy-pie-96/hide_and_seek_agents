@@ -12,11 +12,11 @@ Actions (discrete, 11 total):
   3  LEFT
   4  RIGHT
   5  TOGGLE_LIGHT     — flip light switch if standing on LIGHT_SW tile
-  6  BARRICADE_DOOR   — block adjacent DOOR tile
+    6  BARRICADE        — block adjacent DOOR tile
   7  DROP_FAKE_FOOD   — place a fake food on current tile
   8  DROP_SCENT       — leave a scent trail on current tile
-  9  TEAM_SIGNAL_A    — coordinate signal A (used for team-only mechanics)
-  10 TEAM_SIGNAL_B    — coordinate signal B
+    9  SIGNAL_A         — coordinate signal A (used for team-only mechanics)
+ 10  SIGNAL_B         — coordinate signal B
 
 Team-only mechanics (checked in environment step):
   • Heavy barricade push: 2+ hiders adjacent to HEAVY_OBJ, both signal A
@@ -53,6 +53,14 @@ class Action(IntEnum):
 
 N_ACTIONS = len(Action)
 
+N_HIDERS = 3
+N_SEEKERS = 3
+N_AGENTS = N_HIDERS + N_SEEKERS
+MAX_ROOMS_TRACK = 32
+
+# Global critic state: per-agent(6) + room lights(32) + misc(6)
+GLOBAL_STATE_DIM = N_AGENTS * 6 + MAX_ROOMS_TRACK + 6
+
 MOVE_DELTAS = {
     Action.UP:    (-1,  0),
     Action.DOWN:  ( 1,  0),
@@ -62,18 +70,18 @@ MOVE_DELTAS = {
 }
 
 # ── FOV & observation constants ──────────────────────────────────────────────
-FOV_RADIUS   = 4      # tiles in each direction
-FOV_SIZE     = 2 * FOV_RADIUS + 1   # 9×9 window
-N_TILE_TYPES = 11     # tile int values 0-10 (including -1 mapped to 10 for dark)
+FOV_RADIUS   = 4
+FOV_SIZE     = 2 * FOV_RADIUS + 1
+N_TILE_TYPES = 11
+FOV_CHANNELS = 2      # tile ids + scent intensity
 
 # Observation layout (flat):
-#   [fov_grid (FOV_SIZE²),  own_state (6),  teammate_states (2 × 5),  team_signals (2)]
-#   = 81 + 6 + 10 + 2 = 99 floats
-OBS_FOV       = FOV_SIZE * FOV_SIZE   # 81
-OBS_SELF      = 6    # row, col, dir, alive, food_count, cooldown
+#   [fov_grid (FOV_SIZE² * channels), own_state (6), teammates (2×5), signals (2)]
+OBS_FOV       = FOV_SIZE * FOV_SIZE * FOV_CHANNELS
+OBS_SELF      = 13   # row, col, dir, alive, food_count, room, compass, stagnation, id one-hot
 OBS_TEAMMATE  = 5    # row, col, alive, food_count, last_signal
 OBS_SIGNAL    = 2    # last signals from self
-OBS_DIM = OBS_FOV + OBS_SELF + 2 * OBS_TEAMMATE + OBS_SIGNAL  # 99
+OBS_DIM = OBS_FOV + OBS_SELF + 2 * OBS_TEAMMATE + OBS_SIGNAL
 
 
 class Agent:
@@ -114,6 +122,8 @@ class Agent:
         # Penalty tracking (for reward shaping)
         self.steps_alive: int = 0
         self.rooms_visited: set = set()
+        self.stagnation_anchor: Tuple[int, int] = (0, 0)
+        self.stagnation_steps: int = 0
 
         # Stun (seekers can stun hiders briefly via coordinated sweep)
         self.stunned_for: int = 0
@@ -127,6 +137,8 @@ class Agent:
         self.food_count    = 0
         self.steps_alive   = 0
         self.rooms_visited = set()
+        self.stagnation_anchor = (row, col)
+        self.stagnation_steps = 0
         self.last_signal   = 0
         self.stunned_for   = 0
         self._reset_cooldowns()
@@ -149,7 +161,10 @@ class Agent:
                 self.stunned_for -= 1
             return {'moved': False, 'action': action}
 
-        act = Action(action)
+        try:
+            act = Action(action)
+        except ValueError:
+            act = Action.STAY
         info = {'moved': False, 'ate_food': False, 'ate_fake': False,
                 'toggled_light': False, 'barricaded': False,
                 'dropped_fake': False, 'dropped_scent': False,
@@ -224,6 +239,12 @@ class Agent:
 
         self.steps_alive += 1
 
+        if abs(self.row - self.stagnation_anchor[0]) <= 1 and abs(self.col - self.stagnation_anchor[1]) <= 1:
+            self.stagnation_steps += 1
+        else:
+            self.stagnation_anchor = (self.row, self.col)
+            self.stagnation_steps = 0
+
         # Track room visits
         room = world.get_room(self.row, self.col)
         if room:
@@ -242,21 +263,36 @@ class Agent:
         obs = np.zeros(OBS_DIM, dtype=np.float32)
         ptr = 0
 
-        # -- FOV grid (flattened, normalised) --------------------------------
+        # -- FOV grid (tile channel + scent channel) --------------------------
         fov = world.get_fov(self.row, self.col, radius=FOV_RADIUS)
-        # Map -1 (dark) to N_TILE_TYPES-1 so range is [0, N_TILE_TYPES-1]
         fov_norm = np.where(fov == -1, N_TILE_TYPES - 1, fov).astype(np.float32)
-        fov_norm /= (N_TILE_TYPES - 1)   # [0, 1]
-        obs[ptr:ptr + OBS_FOV] = fov_norm.flatten()
+        fov_norm /= (N_TILE_TYPES - 1)
+        scent = world.get_scent_fov(self.row, self.col, radius=FOV_RADIUS)
+        spatial = np.stack([fov_norm, scent], axis=-1).astype(np.float32)
+        obs[ptr:ptr + OBS_FOV] = spatial.reshape(-1)
         ptr += OBS_FOV
 
-        # -- Own state --------------------------------------------------------
+        # -- Own state + global hints + identity ------------------------------
+        rid = world.tile_to_room.get((self.row, self.col))
+        room_hint = -1.0 if rid is None else float(rid) / max(1.0, float(len(world.rooms) - 1))
+        compass_y = self.row / max(1.0, world.height - 1)
+        compass_x = self.col / max(1.0, world.width - 1)
+        stagnation = min(1.0, self.stagnation_steps / 30.0)
+        local_id = self.agent_id if self.team == Team.HIDER else self.agent_id - N_HIDERS
+
         obs[ptr]   = self.row  / world.height
         obs[ptr+1] = self.col  / world.width
         obs[ptr+2] = (self.last_dir[0] + 1) / 2.0   # map (-1,0,1) to (0,0.5,1)
         obs[ptr+3] = (self.last_dir[1] + 1) / 2.0
         obs[ptr+4] = float(self.alive)
         obs[ptr+5] = min(self.food_count / 10.0, 1.0)
+        obs[ptr+6] = room_hint
+        obs[ptr+7] = compass_y
+        obs[ptr+8] = compass_x
+        obs[ptr+9] = stagnation
+        obs[ptr+10] = 1.0 if local_id == 0 else 0.0
+        obs[ptr+11] = 1.0 if local_id == 1 else 0.0
+        obs[ptr+12] = 1.0 if local_id == 2 else 0.0
         ptr += OBS_SELF
 
         # -- Teammate states --------------------------------------------------

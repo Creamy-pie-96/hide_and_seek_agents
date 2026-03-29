@@ -26,6 +26,7 @@ import numpy as np
 import random
 from dataclasses import dataclass, field
 from typing import List, Tuple, Optional, Dict
+from env.objects import ObjectState
 
 # ── Tile constants ──────────────────────────────────────────────────────────
 EMPTY      = 0
@@ -343,10 +344,7 @@ class World:
         self.height        = height
 
         # Dynamic state
-        self.barricaded_doors: set = set()   # (r,c) doors that are blocked
-        self.scent_map  = np.zeros((height, width), dtype=np.float32)
-        self.scent_ttl  = np.zeros((height, width), dtype=np.int32)
-        self.fake_food  : List[Tuple[int,int]] = []
+        self.objects = ObjectState(width=width, height=height)
 
     # ── Tile queries ─────────────────────────────────────────────────────────
 
@@ -356,7 +354,7 @@ class World:
         t = self.grid[r, c]
         if t in SOLID:
             return False
-        if (r, c) in self.barricaded_doors:
+        if (r, c) in self.objects.barricaded_doors:
             return False
         return True
 
@@ -379,18 +377,22 @@ class World:
         if room is None:
             return False
         room.light_on = not room.light_on
+        if not room.light_on:
+            self.objects.set_light_ping((r, c), ttl=8)
         return True
 
     def place_barricade(self, r: int, c: int) -> bool:
-        if self.grid[r, c] == DOOR and (r, c) not in self.barricaded_doors:
-            self.barricaded_doors.add((r, c))
+        if not (0 <= r < self.height and 0 <= c < self.width):
+            return False
+        if self.grid[r, c] == DOOR and (r, c) not in self.objects.barricaded_doors:
+            self.objects.add_barricade((r, c))
             self.grid[r, c] = BARRICADE
             return True
         return False
 
     def remove_barricade(self, r: int, c: int) -> bool:
-        if (r, c) in self.barricaded_doors:
-            self.barricaded_doors.discard((r, c))
+        if (r, c) in self.objects.barricaded_doors:
+            self.objects.remove_barricade((r, c))
             self.grid[r, c] = DOOR
             return True
         return False
@@ -398,14 +400,14 @@ class World:
     def drop_fake_food(self, r: int, c: int) -> bool:
         if self.grid[r, c] == EMPTY:
             self.grid[r, c] = FAKE_FOOD
-            self.fake_food.append((r, c))
+            self.objects.add_fake_food((r, c))
             return True
         return False
 
     def drop_scent(self, r: int, c: int, strength: float = 1.0,
                    ttl: int = 15) -> None:
-        self.scent_map[r, c] = strength
-        self.scent_ttl[r, c] = ttl
+        if 0 <= r < self.height and 0 <= c < self.width:
+            self.objects.drop_scent(r, c, strength=strength, ttl=ttl)
 
     def consume_food(self, r: int, c: int) -> Tuple[bool, bool]:
         """Returns (consumed, was_fake)."""
@@ -414,8 +416,7 @@ class World:
             return True, False
         if self.grid[r, c] == FAKE_FOOD:
             self.grid[r, c] = EMPTY
-            if (r, c) in self.fake_food:
-                self.fake_food.remove((r, c))
+            self.objects.remove_fake_food((r, c))
             return True, True
         return False, False
 
@@ -440,11 +441,8 @@ class World:
 
     def step_scent(self) -> None:
         """Decay scent every world step."""
-        mask = self.scent_ttl > 0
-        self.scent_ttl[mask]  -= 1
-        self.scent_map[mask]  *= 0.85
-        # Zero out fully decayed
-        self.scent_map[self.scent_ttl == 0] = 0.0
+        self.objects.decay_scent(decay=0.85)
+        self.objects.step_light_ping()
 
     # ── Observation helpers ───────────────────────────────────────────────────
 
@@ -468,6 +466,10 @@ class World:
                         fov[gi, gj] = self.grid[r, c]
         return fov
 
+    def get_scent_fov(self, row: int, col: int, radius: int = 3) -> np.ndarray:
+        """Return local scent intensity window in [0, 1]."""
+        return self.objects.scent_window(row=row, col=col, radius=radius)
+
     def get_room_light_status(self) -> List[bool]:
         return [r.light_on for r in self.rooms]
 
@@ -475,10 +477,7 @@ class World:
 
     def reset(self) -> None:
         self.grid = self._base_grid.copy()
-        self.barricaded_doors.clear()
-        self.scent_map[:] = 0
-        self.scent_ttl[:] = 0
-        self.fake_food.clear()
+        self.objects.reset()
         for room in self.rooms:
             room.light_on = True
 
@@ -493,3 +492,19 @@ class World:
                 row += symbols.get(self.grid[r,c], '?')
             rows.append(row)
         return '\n'.join(rows)
+
+    @property
+    def scent_map(self) -> np.ndarray:
+        return self.objects.scent_map
+
+    @property
+    def scent_ttl(self) -> np.ndarray:
+        return self.objects.scent_ttl
+
+    @property
+    def fake_food(self) -> List[Tuple[int, int]]:
+        return sorted(self.objects.fake_food)
+
+    @property
+    def barricaded_doors(self) -> set:
+        return self.objects.barricaded_doors

@@ -15,6 +15,7 @@ HUD (top bar):
 """
 
 import numpy as np
+from typing import cast
 
 try:
     import pygame
@@ -106,13 +107,21 @@ class HideSeekRenderer:
         Draw one frame. Returns False if the window was closed.
         state comes from env.get_render_state().
         """
+        if self.screen is None or self.clock is None or self.font_sm is None or self.font_md is None:
+            raise RuntimeError("renderer not initialised; call init() first")
+
+        screen = cast(pygame.Surface, self.screen)
+        clock = cast(pygame.time.Clock, self.clock)
+        font_sm = cast(pygame.font.Font, self.font_sm)
+        font_md = cast(pygame.font.Font, self.font_md)
+
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 return False
             if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
                 return False
 
-        self.screen.fill(C_BG)
+        screen.fill(C_BG)
 
         grid      = state['grid']
         scent_map = state['scent_map']
@@ -120,6 +129,7 @@ class HideSeekRenderer:
 
         # Build quick room-lit lookup
         lit_rooms = {r.room_id: r.light_on for r in rooms}
+        tile_to_room = state.get('tile_to_room', {})
 
         # ── Tiles ────────────────────────────────────────────────────────────
         tp = self.tile_px
@@ -132,18 +142,14 @@ class HideSeekRenderer:
                 colour = TILE_COLOURS.get(tile, C_FLOOR)
 
                 # Dim unlit rooms
-                room_id = None
-                for room in rooms:
-                    if room.contains(r, c):
-                        room_id = room.room_id
-                        break
+                room_id = tile_to_room.get((r, c))
                 if room_id is not None and not lit_rooms.get(room_id, True):
                     # Blend toward dark
                     colour = tuple(max(0, v - 22) for v in C_FLOOR_DARK)
                     if tile in (HIDE_SPOT, LIGHT_SW, FOOD, FAKE_FOOD, HEAVY_OBJ):
                         colour = tuple(int(a * 0.45) for a in TILE_COLOURS[tile])
 
-                pygame.draw.rect(self.screen, colour, (px, py, tp, tp))
+                pygame.draw.rect(screen, colour, (px, py, tp, tp))
 
                 # Scent overlay
                 scent = scent_map[r, c]
@@ -151,16 +157,16 @@ class HideSeekRenderer:
                     alpha = int(scent * 100)
                     surf  = pygame.Surface((tp, tp), pygame.SRCALPHA)
                     surf.fill((*C_SCENT, alpha))
-                    self.screen.blit(surf, (px, py))
+                    screen.blit(surf, (px, py))
 
         # ── Grid lines (subtle) ───────────────────────────────────────────────
         line_col = (30, 30, 40)
         for r in range(0, self.grid_h + 1):
             y = r * tp + self.HUD_HEIGHT
-            pygame.draw.line(self.screen, line_col, (0, y), (self.win_w, y))
+            pygame.draw.line(screen, line_col, (0, y), (self.win_w, y))
         for c in range(0, self.grid_w + 1):
             x = c * tp
-            pygame.draw.line(self.screen, line_col, (x, self.HUD_HEIGHT),
+            pygame.draw.line(screen, line_col, (x, self.HUD_HEIGHT),
                              (x, self.win_h))
 
         # ── Agents ───────────────────────────────────────────────────────────
@@ -175,10 +181,10 @@ class HideSeekRenderer:
             if not alive:
                 colour = C_HIDER_DEAD
                 # Draw X
-                pygame.draw.line(self.screen, colour,
+                pygame.draw.line(screen, colour,
                                  (cx - radius, cy - radius),
                                  (cx + radius, cy + radius), 2)
-                pygame.draw.line(self.screen, colour,
+                pygame.draw.line(screen, colour,
                                  (cx + radius, cy - radius),
                                  (cx - radius, cy + radius), 2)
             else:
@@ -186,20 +192,29 @@ class HideSeekRenderer:
                     colour = C_HIDER_STUN if is_hider else C_SEEKER_STUN
                 else:
                     colour = C_HIDER if is_hider else C_SEEKER
-                pygame.draw.circle(self.screen, colour, (cx, cy), radius)
+                pygame.draw.circle(screen, colour, (cx, cy), radius)
                 # Outline
-                pygame.draw.circle(self.screen, (255, 255, 255), (cx, cy), radius, 1)
+                pygame.draw.circle(screen, (255, 255, 255), (cx, cy), radius, 1)
                 # Agent ID label
-                lbl = self.font_sm.render(str(aid), True, (0, 0, 0))
-                self.screen.blit(lbl, (cx - lbl.get_width() // 2,
+                lbl = font_sm.render(str(aid), True, (0, 0, 0))
+                screen.blit(lbl, (cx - lbl.get_width() // 2,
                                        cy - lbl.get_height() // 2))
                 # Food dots
                 for fi in range(min(food, 5)):
                     fx = cx - 4 + fi * 2
-                    pygame.draw.circle(self.screen, C_FOOD, (fx, cy + radius + 2), 1)
+                    pygame.draw.circle(screen, C_FOOD, (fx, cy + radius + 2), 1)
+
+                light_ping = state.get('light_ping')
+                if light_ping is not None:
+                    pr, pc = light_ping['pos']
+                    ttl = max(1, int(light_ping.get('ttl', 1)))
+                    cx = pc * tp + tp // 2
+                    cy = pr * tp + tp // 2 + self.HUD_HEIGHT
+                    ping_r = max(5, tp // 2 + ttl)
+                    pygame.draw.circle(screen, (255, 180, 80), (cx, cy), ping_r, 2)
 
         # ── HUD ──────────────────────────────────────────────────────────────
-        pygame.draw.rect(self.screen, C_HUD_BG, (0, 0, self.win_w, self.HUD_HEIGHT))
+        pygame.draw.rect(screen, C_HUD_BG, (0, 0, self.win_w, self.HUD_HEIGHT))
 
         step      = state['step']
         max_steps = state['max_steps']
@@ -216,21 +231,9 @@ class HideSeekRenderer:
         bar_h = 4
         bar_x, bar_y = 10, self.HUD_HEIGHT - 8
         filled = int(bar_w * step / max_steps)
-        pygame.draw.rect(self.screen, (60, 60, 80), (bar_x, bar_y, bar_w, bar_h))
+        pygame.draw.rect(screen, (60, 60, 80), (bar_x, bar_y, bar_w, bar_h))
         bar_colour = C_HUD_PREP if is_prep else C_HUD_HUNT
-        pygame.draw.rect(self.screen, bar_colour, (bar_x, bar_y, filled, bar_h))
-
-        y_text = 6
-        for text, colour in [
-            (phase_str, phase_col),
-            (step_str, C_HUD_TEXT),
-            (f"  |  {hiders_str}", C_HUD_TEXT),
-        ]:
-            surf = self.font_md.render(text, True, colour)
-            self.screen.blit(surf, (10, y_text))
-            # Crude inline layout — advance x
-            y_text += 0   # all on same row via surface blit with x offset
-            break           # rewrite below properly
+        pygame.draw.rect(screen, bar_colour, (bar_x, bar_y, filled, bar_h))
 
         x_cursor = 10
         for text, colour in [
@@ -239,12 +242,12 @@ class HideSeekRenderer:
             ("   |   ", C_HUD_TEXT),
             (hiders_str, C_HIDER if caught < 3 else C_HIDER_DEAD),
         ]:
-            surf = self.font_md.render(text, True, colour)
-            self.screen.blit(surf, (x_cursor, 6))
+            surf = font_md.render(text, True, colour)
+            screen.blit(surf, (x_cursor, 6))
             x_cursor += surf.get_width()
 
         pygame.display.flip()
-        self.clock.tick(fps)
+        clock.tick(fps)
         return True
 
     def close(self) -> None:

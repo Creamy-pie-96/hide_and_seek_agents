@@ -19,17 +19,20 @@ MAPPO). In 3v3 we have:
 import torch
 import torch.nn as nn
 import numpy as np
-from typing import Tuple, Optional
+from typing import Tuple, Optional, cast
 
 from env.agent import (OBS_DIM, OBS_FOV, OBS_SELF, OBS_TEAMMATE,
-                       N_ACTIONS, FOV_SIZE, N_TILE_TYPES)
+                       N_ACTIONS, FOV_SIZE, N_TILE_TYPES, FOV_CHANNELS,
+                       GLOBAL_STATE_DIM)
 
 # ── Sizes ────────────────────────────────────────────────────────────────────
-CNN_CHANNELS  = [1, 16, 32]      # input channels, hidden, output channels
+CNN_CHANNELS  = [FOV_CHANNELS, 16, 32]
 CNN_OUT_DIM   = 32 * 3 * 3      # after 2×MaxPool on 9×9 → 2×2... actually 3×3
 
-SCALAR_DIM    = OBS_DIM - OBS_FOV          # 99 - 81 = 18
+SCALAR_DIM    = OBS_DIM - OBS_FOV
 SCALAR_HIDDEN = 64
+TEAM_SIZE     = 3
+VALUE_OBS_DIM = GLOBAL_STATE_DIM
 
 LSTM_HIDDEN   = 128
 LSTM_LAYERS   = 1
@@ -47,19 +50,20 @@ class FOVEncoder(nn.Module):
     def __init__(self):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Conv2d(1, 16, kernel_size=3, padding=1),   # → (16, 9, 9)
+            nn.Conv2d(FOV_CHANNELS, 16, kernel_size=3, padding=1),
             nn.ReLU(),
-            nn.Conv2d(16, 32, kernel_size=3, padding=1),  # → (32, 9, 9)
+            nn.Conv2d(16, 32, kernel_size=3, padding=1),
             nn.ReLU(),
-            nn.MaxPool2d(3),                               # → (32, 3, 3)
-            nn.Flatten(),                                  # → 288
+            nn.MaxPool2d(3),
+            nn.Flatten(),
         )
-        self.out_dim = 32 * 3 * 3   # 288
+        self.out_dim = 32 * 3 * 3
 
     def forward(self, fov: torch.Tensor) -> torch.Tensor:
-        # fov: (B, FOV_SIZE²) → (B, 1, FOV_SIZE, FOV_SIZE)
+        # fov: flattened interleaved [tile, scent] channels.
+        # reshape: (B, FOV_SIZE, FOV_SIZE, C) -> (B, C, FOV_SIZE, FOV_SIZE)
         B = fov.shape[0]
-        x = fov.view(B, 1, FOV_SIZE, FOV_SIZE)
+        x = fov.view(B, FOV_SIZE, FOV_SIZE, FOV_CHANNELS).permute(0, 3, 1, 2)
         return self.net(x)
 
 
@@ -112,10 +116,16 @@ class ActorCritic(nn.Module):
             nn.Linear(POLICY_HIDDEN, n_actions),
         )
 
+        # Centralized critic path (team context)
+        self.value_encoder = nn.Sequential(
+            nn.Linear(VALUE_OBS_DIM, 256),
+            nn.ReLU(),
+            nn.Linear(256, VALUE_HIDDEN),
+            nn.ReLU(),
+        )
+
         # Value head
         self.value_head = nn.Sequential(
-            nn.Linear(LSTM_HIDDEN, VALUE_HIDDEN),
-            nn.ReLU(),
             nn.Linear(VALUE_HIDDEN, 1),
         )
 
@@ -124,16 +134,22 @@ class ActorCritic(nn.Module):
     def _init_weights(self) -> None:
         for m in self.modules():
             if isinstance(m, (nn.Linear, nn.Conv2d)):
-                nn.init.orthogonal_(m.weight, gain=np.sqrt(2))
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
+                w = getattr(m, "weight", None)
+                b = getattr(m, "bias", None)
+                if isinstance(w, torch.Tensor):
+                    nn.init.orthogonal_(w, gain=np.sqrt(2))
+                if isinstance(b, torch.Tensor):
+                    nn.init.zeros_(b)
         # Policy head: smaller init for more uniform initial policy
-        nn.init.orthogonal_(self.policy[-1].weight, gain=0.01)
+        policy_last = cast(nn.Linear, self.policy[-1])
+        nn.init.orthogonal_(policy_last.weight, gain=0.01)
 
     def forward(
         self,
         obs: torch.Tensor,
         lstm_state: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        value_obs: Optional[torch.Tensor] = None,
+        action_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor,
                Tuple[torch.Tensor, torch.Tensor]]:
         """
@@ -142,7 +158,7 @@ class ActorCritic(nn.Module):
 
         Returns:
             logits     : (B, N_ACTIONS)
-            value      : (B,)
+            value      : (B,) computed from centralized value input
             lstm_state : updated hidden state
         """
         B = obs.shape[0]
@@ -165,15 +181,74 @@ class ActorCritic(nn.Module):
         h = lstm_out.squeeze(1)                                # (B, 128)
 
         logits = self.policy(h)                           # (B, N_ACTIONS)
-        value  = self.value_head(h).squeeze(-1)           # (B,)
+        logits = self._apply_action_mask(logits, action_mask)
+        if value_obs is None:
+            value_obs = torch.zeros((B, VALUE_OBS_DIM), dtype=obs.dtype, device=obs.device)
+        vfeat = self.value_encoder(value_obs)
+        value  = self.value_head(vfeat).squeeze(-1)
 
         return logits, value, new_state
+
+    def _apply_action_mask(self, logits: torch.Tensor, action_mask: Optional[torch.Tensor]) -> torch.Tensor:
+        if action_mask is None:
+            return logits
+        # action_mask: 1.0 for valid, 0.0 for invalid
+        return logits.masked_fill(action_mask <= 0.0, -1e10)
+
+    def forward_sequence(
+        self,
+        obs_seq: torch.Tensor,
+        reset_seq: torch.Tensor,
+        value_obs_seq: Optional[torch.Tensor] = None,
+        action_mask_seq: Optional[torch.Tensor] = None,
+        init_state: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        """
+        Recurrent unroll over sequence.
+
+        obs_seq: (B, T, OBS_DIM)
+        reset_seq: (B, T) bool, True means reset hidden before this step.
+        value_obs_seq: (B, T, VALUE_OBS_DIM) optional
+        action_mask_seq: (B, T, N_ACTIONS) optional
+        """
+        B, T, _ = obs_seq.shape
+        if init_state is None:
+            state = self._init_hidden(B, obs_seq.device)
+        else:
+            state = init_state
+
+        logits_steps = []
+        value_steps = []
+        for t in range(T):
+            rst = reset_seq[:, t].view(1, B, 1).to(dtype=state[0].dtype)
+            h, c = state
+            h = h * (1.0 - rst)
+            c = c * (1.0 - rst)
+            state = (h, c)
+
+            obs_t = obs_seq[:, t, :]
+            vobs_t = None if value_obs_seq is None else value_obs_seq[:, t, :]
+            amask_t = None if action_mask_seq is None else action_mask_seq[:, t, :]
+            logits_t, value_t, state = self.forward(
+                obs_t,
+                lstm_state=state,
+                value_obs=vobs_t,
+                action_mask=amask_t,
+            )
+            logits_steps.append(logits_t)
+            value_steps.append(value_t)
+
+        logits_seq = torch.stack(logits_steps, dim=1)
+        value_seq = torch.stack(value_steps, dim=1)
+        return logits_seq, value_seq, state
 
     def get_action_and_value(
         self,
         obs: torch.Tensor,
         lstm_state: Optional[Tuple] = None,
         action: Optional[torch.Tensor] = None,
+        value_obs: Optional[torch.Tensor] = None,
+        action_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor,
                torch.Tensor, Tuple]:
         """
@@ -182,7 +257,12 @@ class ActorCritic(nn.Module):
 
         Returns: action, log_prob, entropy, value, new_lstm_state
         """
-        logits, value, new_state = self.forward(obs, lstm_state)
+        logits, value, new_state = self.forward(
+            obs,
+            lstm_state,
+            value_obs=value_obs,
+            action_mask=action_mask,
+        )
         dist     = torch.distributions.Categorical(logits=logits)
 
         if action is None:

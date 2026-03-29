@@ -38,6 +38,8 @@ def main():
 
     if args.load:
         ckpt = torch.load(args.load, map_location=device)
+        if not isinstance(ckpt, dict) or 'hider_net' not in ckpt or 'seeker_net' not in ckpt:
+            raise ValueError("Invalid checkpoint format")
         hider_net.load_state_dict(ckpt['hider_net'])
         seeker_net.load_state_dict(ckpt['seeker_net'])
         print(f"Loaded checkpoint: {args.load}")
@@ -61,17 +63,21 @@ def main():
 
         while running:
             action_dict = {}
+            action_masks = env.get_action_masks()
             with torch.no_grad():
                 for agent in env.agents:
                     aid = agent.agent_id
                     if not agent.alive:
                         action_dict[aid] = 0
+                        hidden[aid] = None
                         continue
                     if use_trained:
                         net = hider_net if aid in HIDER_IDS else seeker_net
                         obs_t = torch.tensor(obs_dict[aid], dtype=torch.float32,
                                              device=device).unsqueeze(0)
-                        logits, _, new_h = net(obs_t, hidden[aid])
+                        mask_t = torch.tensor(action_masks[aid], dtype=torch.float32,
+                                              device=device).unsqueeze(0)
+                        logits, _, new_h = net(obs_t, hidden[aid], action_mask=mask_t)
                         hidden[aid] = new_h
                         action_dict[aid] = logits.argmax(dim=-1).item()
                     else:
