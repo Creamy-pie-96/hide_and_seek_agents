@@ -2,3 +2,10 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+outputs/
+checkpoints/
+snake game/benchmarks/
+snake game/logs/
+snake game/checkpoints/
+Matlab Cheat Sheet (api Style).pdf
+assest/

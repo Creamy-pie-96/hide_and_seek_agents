@@ -28,6 +28,8 @@ class Transition:
 	value_obs: np.ndarray
 	action_mask: np.ndarray
 	pad: bool
+	ghost_action: int = 0
+	ghost_valid: bool = False
 
 
 @dataclass
@@ -56,6 +58,8 @@ class AgentRollout:
 				'alive': np.empty((0,), dtype=np.bool_),
 				'action_mask': np.empty((0, 0), dtype=np.float32),
 				'pad': np.empty((0,), dtype=np.bool_),
+				'ghost_actions': np.empty((0,), dtype=np.int64),
+				'ghost_valid': np.empty((0,), dtype=np.bool_),
 			}
 
 		obs = np.stack([t.obs for t in self.transitions]).astype(np.float32)
@@ -68,6 +72,8 @@ class AgentRollout:
 		alive = np.array([t.alive for t in self.transitions], dtype=np.bool_)
 		action_mask = np.stack([t.action_mask for t in self.transitions]).astype(np.float32)
 		pad = np.array([t.pad for t in self.transitions], dtype=np.bool_)
+		ghost_actions = np.array([t.ghost_action for t in self.transitions], dtype=np.int64)
+		ghost_valid = np.array([t.ghost_valid for t in self.transitions], dtype=np.bool_)
 
 		return {
 			'obs': obs,
@@ -80,6 +86,8 @@ class AgentRollout:
 			'alive': alive,
 			'action_mask': action_mask,
 			'pad': pad,
+			'ghost_actions': ghost_actions,
+			'ghost_valid': ghost_valid,
 		}
 
 
@@ -111,6 +119,8 @@ class TeamRolloutMemory:
 		value_obs: np.ndarray,
 		action_mask: np.ndarray,
 		pad: bool,
+		ghost_action: int = 0,
+		ghost_valid: bool = False,
 	) -> None:
 		self._store[agent_id].add(
 			Transition(
@@ -124,6 +134,8 @@ class TeamRolloutMemory:
 				value_obs=value_obs,
 				action_mask=action_mask,
 				pad=bool(pad),
+				ghost_action=int(ghost_action),
+				ghost_valid=bool(ghost_valid),
 			)
 		)
 
@@ -142,6 +154,8 @@ class TeamRolloutMemory:
 			'alive': [],
 			'action_mask': [],
 			'pad': [],
+			'ghost_actions': [],
+			'ghost_valid': [],
 		}
 		for aid in team_ids:
 			arr = self.arrays_for(aid)
@@ -159,6 +173,10 @@ class TeamRolloutMemory:
 					out[k] = np.empty((0,), dtype=np.int64)
 				elif k in ('dones', 'alive', 'pad'):
 					out[k] = np.empty((0,), dtype=np.bool_)
+				elif k in ('ghost_valid',):
+					out[k] = np.empty((0,), dtype=np.bool_)
+				elif k in ('ghost_actions',):
+					out[k] = np.empty((0,), dtype=np.int64)
 				elif k in ('action_mask',):
 					out[k] = np.empty((0, 0), dtype=np.float32)
 				else:

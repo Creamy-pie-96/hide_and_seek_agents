@@ -98,6 +98,78 @@ class HideSeekEnv:
         except (ValueError, TypeError):
             return int(Action.STAY)
 
+    @staticmethod
+    def _ghost_action_toward(src: Tuple[int, int], dst: Tuple[int, int]) -> int:
+        """Omniscient ghost action: axis-priority move toward target, ignores walls."""
+        sr, sc = src
+        tr, tc = dst
+        dr = tr - sr
+        dc = tc - sc
+        if abs(dr) >= abs(dc):
+            if dr < 0:
+                return int(Action.UP)
+            if dr > 0:
+                return int(Action.DOWN)
+        if dc < 0:
+            return int(Action.LEFT)
+        if dc > 0:
+            return int(Action.RIGHT)
+        return int(Action.STAY)
+
+    def _apply_inverse_reward_heatmap(self,
+                                      rewards: Dict[int, float],
+                                      step_info: Dict[int, dict],
+                                      action_dict: Dict[int, int]) -> None:
+        """
+        Dense seeker shaping: tiny reward for moving/facing along corridors toward hiders,
+        even from far away. Also records ghost-expert action hints for imitation.
+        """
+        world = self._world()
+        alive_hiders = [h for h in self.hiders if h.alive]
+        if not alive_hiders:
+            return
+        hider_positions = [(h.row, h.col) for h in alive_hiders]
+
+        for s in self.seekers:
+            if not s.alive:
+                continue
+
+            prev_r, prev_c = step_info.get(s.agent_id, {}).get('prev_pos', (s.row, s.col))
+            old_dist = world.shortest_path_distance((prev_r, prev_c), hider_positions)
+            new_dist = world.shortest_path_distance((s.row, s.col), hider_positions)
+
+            # Massive gravity-well style dense signal (distance-shaped).
+            if new_dist is not None:
+                rewards[s.agent_id] += 2.0 / (1.0 + float(new_dist))
+
+            if old_dist is not None and new_dist is not None:
+                delta = float(old_dist - new_dist)
+                # Stronger positive shaping when seeker reduces path distance.
+                rewards[s.agent_id] += 0.9 * delta
+
+            # Hallway-following bonus: move into next shortest-path tile.
+            next_tile = world.next_step_toward((prev_r, prev_c), hider_positions)
+            if next_tile is not None and (s.row, s.col) == next_tile:
+                rewards[s.agent_id] += 0.75
+
+            # Facing-toward-hider bonus (even without movement).
+            nearest = min(hider_positions, key=lambda p: abs(p[0] - s.row) + abs(p[1] - s.col))
+            vr = nearest[0] - s.row
+            vc = nearest[1] - s.col
+            dot = s.last_dir[0] * vr + s.last_dir[1] * vc
+            if dot > 0:
+                rewards[s.agent_id] += 0.25
+
+            ghost_act = self._ghost_action_toward((prev_r, prev_c), nearest)
+            followed_ghost = int(action_dict.get(s.agent_id, int(Action.STAY))) == ghost_act
+            if followed_ghost:
+                rewards[s.agent_id] += 0.4
+
+            info = step_info.setdefault(s.agent_id, {})
+            info['ghost_action'] = int(ghost_act)
+            info['ghost_valid'] = True
+            info['ghost_followed'] = bool(followed_ghost)
+
     # ── Reset ─────────────────────────────────────────────────────────────────
 
     def reset(self, seed: Optional[int] = None) -> Tuple[Dict, Dict]:
@@ -202,6 +274,10 @@ class HideSeekEnv:
 
         # -- Exploration penalty for seekers (empty room entry) ---------------
         self._check_seeker_empty_rooms(rewards, step_info)
+
+        # -- Dense seeker guidance (inverse reward heatmap + ghost hints) -----
+        if not is_prep:
+            self._apply_inverse_reward_heatmap(rewards, step_info, action_dict)
 
         # -- Done conditions --------------------------------------------------
         done_dict = self._build_done()

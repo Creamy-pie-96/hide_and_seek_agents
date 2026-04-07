@@ -1,163 +1,110 @@
-# FIX REPORT — hide_and_seek_agents
+# ISSUE TRACKER — hide_and_seek_agents
 
-Date: 2026-03-29
-Scope: Full stabilization and refactor pipeline based on completed audit.
-
----
-
-## Critical Issues
-
-### C1 — Missing core object module (`env/objects.py` is empty)
-
-**Explanation**: The project design specifies object mechanics in a dedicated module, but the file is empty.
-**Impact**: Object lifecycle is ad-hoc and tightly coupled to world internals; extension and testing are blocked.
-**Fix approach**: Implement typed object models (food, fake food, scent, barricade, light switches, heavy objects) and central object-state helpers used by world/env.
-
-### C2 — Missing rollout-memory module (`rl/memory.py` is empty)
-
-**Explanation**: Rollout data is embedded in trainer instead of a standalone memory component.
-**Impact**: Poor separation of concerns, fragile training code, difficult masking/batching correctness.
-**Fix approach**: Implement a dedicated memory API for transition storage, alive masks, tensor conversion, and GAE-ready batch extraction.
-
-### C3 — Coordinated sweep logic is incorrect
-
-**Explanation**: Sweep currently triggers when seekers are in same room/positions, not based on same-step distinct-door entry.
-**Impact**: Repeated unintended stuns and reward exploitation; game mechanics invalid.
-**Fix approach**: Track previous and current positions per seeker and enforce same-step room entry through distinct door tiles.
-
-### C4 — Scent is not observable in agent observations
-
-**Explanation**: Scent exists in `scent_map` but observation encodes only tile IDs.
-**Impact**: Mechanic cannot be learned or used by policies.
-**Fix approach**: Add scent channel in observation generation and include it in network input parsing.
-
-### C5 — Dead-agent transitions are incorrectly added into PPO batches
-
-**Explanation**: Trainer writes dummy transitions for dead agents for remaining rollout steps.
-**Impact**: Corrupted policy/value updates and unstable training.
-**Fix approach**: Store alive masks; exclude dead-agent timesteps from optimization and GAE computation.
-
-### C6 — Invalid actions can crash (`Action(action)` cast)
-
-**Explanation**: Out-of-range actions can throw exceptions.
-**Impact**: Runtime crashes under noisy policy/output corruption.
-**Fix approach**: Validate and clamp/fallback invalid actions in environment before dispatch.
-
-### C7 — Spawn partition can fail on low room counts
-
-**Explanation**: Room splitting assumes both hider and seeker room groups are non-empty.
-**Impact**: `random.choice` failures on edge maps.
-**Fix approach**: Add robust spawn fallback ensuring non-empty pools and safe placement.
+Date: 2026-03-30  
+Scope: Open issues only (resolved items removed).
 
 ---
 
-## Major Issues
+## Bug
 
-### M1 — Centralized critic claim is inaccurate
+### B3 — Ursina renderer may fail in headless/no-display environments
 
-**Explanation**: Documentation says centralized value function; implementation is decentralized value.
-**Impact**: Misleading architecture and experiment interpretation.
-**Fix approach**: Implement centralized value input (team context) in network/trainer and align docs.
+- Location: [render/renderer_ursina.py](render/renderer_ursina.py), [play.py](play.py), [train.py](train.py)
+- Problem: 3D renderer requires a graphics context; startup can fail on servers/CI without display.
+- Impact: 3D playback/training render path is unavailable in headless setups.
+- Action:
+  1. Add explicit runtime guard and clear error message with fallback suggestion (`--renderer pygame` or `--no-render`);
+  2. Add a smoke command in docs for local desktop-only validation.
 
-### M2 — Recurrent training mismatch (LSTM used in inference, not properly in PPO update)
+### B1 — Recurrent hidden state reused after policy updates (trainer correctness risk)
 
-**Explanation**: Hidden state is used for action selection but discarded in updates.
-**Impact**: Train/inference mismatch and unstable learning.
-**Fix approach**: Move to consistent feed-forward policy for now (or full sequence training). Adopt feed-forward for correctness/stability.
+- Location: [rl/mappo.py](rl/mappo.py#L269), [rl/mappo.py](rl/mappo.py#L332)
+- Problem: `self.hidden` persists while network weights are updated between rollouts. Hidden state was produced by older parameters and is reused with new parameters.
+- Impact: unstable action selection/value estimation; training drift that is hard to diagnose.
+- Action:
+  1.  reset all hidden states after each PPO update block, while keeping environment continuity;
+  2.  add regression test for hidden-state lifecycle.
 
-### M3 — Full blackout team condition incomplete
+### B2 — Replay input validation is shallow
 
-**Explanation**: Does not enforce “different rooms” and time-window coordination.
-**Impact**: Mechanic can be gamed and diverges from design.
-**Fix approach**: Require all three hiders on switches in distinct rooms with synchronized signal/toggle event.
-
-### M4 — Light toggle risk mechanic (location reveal) is missing
-
-**Explanation**: Turning off lights lacks seeker-visible reveal signal.
-**Impact**: Intended risk/reward tradeoff absent.
-**Fix approach**: Add reveal ping with TTL and include in observations/render state.
-
-### M5 — Renderer performs O(H*W*R) room lookup per frame
-
-**Explanation**: Per-tile iteration scans all rooms.
-**Impact**: Avoidable frame-time cost at larger maps.
-**Fix approach**: Provide tile-to-room map in render state and use O(1) lookup.
-
-### M6 — No tests/CI coverage
-
-**Explanation**: No deterministic/unit integration checks.
-**Impact**: Refactors can silently break mechanics.
-**Fix approach**: Add unit tests for world/env invariants and a basic CI workflow.
-
-### M7 — Documentation is insufficient (`README.md` minimal)
-
-**Explanation**: No setup, usage, architecture, or troubleshooting guidance.
-**Impact**: Onboarding and reproducibility poor.
-**Fix approach**: Expand README with setup, run commands, mechanics, and validation steps.
-
-### M8 — Missing configuration architecture
-
-**Explanation**: Hyperparameters and environment knobs are scattered constants.
-**Impact**: Hard to run reproducible experiments and sweeps.
-**Fix approach**: Introduce structured config dataclasses and CLI wiring.
-
-### M9 — Relay vision mechanic missing
-
-**Explanation**: Team mechanic discussed in design not implemented.
-**Impact**: Feature parity gap and weaker cooperative seeker behavior.
-**Fix approach**: Add seeker adjacency relay visibility rule in vision/catch logic.
-
-### M10 — API claim “PettingZoo-style” is ambiguous/inaccurate
-
-**Explanation**: Interface is custom dict-based, not true PettingZoo API.
-**Impact**: Integration expectations may be wrong.
-**Fix approach**: Clarify API as custom parallel multi-agent interface in docs/comments.
-
-### M11 — Unsafe checkpoint loading with `torch.load`
-
-**Explanation**: Untrusted pickle payload risk.
-**Impact**: Security vulnerability in loading paths.
-**Fix approach**: Enforce trusted-only warning + safer loading parameters where supported + schema validation.
-
-### M12 — Reproducibility controls are incomplete
-
-**Explanation**: Global seeding and deterministic backend configuration are missing/inconsistent.
-**Impact**: Non-reproducible experiments.
-**Fix approach**: Centralize deterministic seed setup for Python/NumPy/Torch and log seed in checkpoint.
-
-### M13 — Numerical stability guards missing
-
-**Explanation**: No NaN/Inf checks on loss/advantages.
-**Impact**: Silent divergence and wasted compute.
-**Fix approach**: Add finite checks with fail-fast diagnostics and optional gradient-skip behavior.
+- Location: [play.py](play.py#L86), [play.py](play.py#L114)
+- Problem: only top-level replay schema and non-empty `frames` are validated; malformed frame payloads can crash mid-playback.
+- Impact: brittle playback pipeline and poor error diagnostics.
+- Action:
+  1.  validate each frame has required keys (`grid`, `agents`, `scent_map`, dimensions);
+  2.  fail early with frame index + reason.
 
 ---
 
-## Minor Issues
+## Design Flaw
 
-### m1 — Renderer HUD has dead/duplicated text path
+### D1 — Headless path still hard-imports GUI modules
 
-**Explanation**: One loop draws then breaks; another loop does actual layout.
-**Impact**: Confusing and harder to maintain.
-**Fix approach**: Remove dead path and keep a single explicit HUD draw flow.
+- Location: [train.py](train.py#L24), [play.py](play.py#L20)
+- Problem: GUI modules are imported unconditionally at module load. `--no-render` still depends on Pygame import side effects.
+- Impact: avoidable startup warnings/failures in headless environments and unnecessary dependency coupling.
+- Action:
+  1.  move renderer imports inside backend selection paths;
+  2.  keep pure headless train/play executable without GUI packages.
 
-### m2 — Naming and action terminology inconsistencies
+### D2 — Plan/architecture drift was unmanaged
 
-**Explanation**: Mixed naming (`BARRICADE_DOOR` vs `BARRICADE`, etc.).
-**Impact**: Cognitive overhead and mistakes during maintenance.
-**Fix approach**: Normalize naming across comments/constants/docs.
-
-### m3 — Weak type annotations in core env/trainer code
-
-**Explanation**: Generic dict types and optional handling warnings.
-**Impact**: Lower static safety and readability.
-**Fix approach**: Tighten typing and add explicit non-None assertions/helpers.
+- Location: [plan.md](plan.md)
+- Problem: plan previously described obsolete greenfield tasks and mismatched API assumptions.
+- Impact: wrong execution priorities and wasted engineering cycles.
+- Action:
+  1.  keep plan synchronized with real architecture;
+  2.  enforce “open issues only” planning updates per release cycle.
 
 ---
 
-## Execution Order
+## Performance Issue
 
-1. Resolve all Critical issues C1 → C7.
-2. Resolve all Major issues M1 → M13.
-3. Resolve all Minor issues m1 → m3.
-4. Run diagnostics and validation checks after each severity tier.
+### P1 — Ursina dynamic entity updates need explicit state-diff guarantees
+
+- Location: [render/renderer_ursina.py](render/renderer_ursina.py)
+- Problem: dynamic objects are updated each frame; update logic must stay diff-based for larger maps.
+- Impact: avoidable CPU/GPU churn and frame drops.
+- Action:
+  1. keep add/remove/update strictly keyed by tile-state diff;
+  2. add unit test for unchanged-frame no-op updates.
+
+### P2 — Metrics logger flushes on each row
+
+- Location: [rl/monitoring.py](rl/monitoring.py#L95), [rl/monitoring.py](rl/monitoring.py#L100)
+- Problem: sync flush per write.
+- Impact: excessive I/O overhead for long runs.
+- Action:
+  1.  switch to buffered flush interval;
+  2.  force flush on checkpoint/save/exit.
+
+---
+
+## Missing Feature
+
+### F1 — Ursina semantic parity with environment state is incomplete
+
+- Location: [render/renderer_ursina.py](render/renderer_ursina.py), [env/hide_seek_env.py](env/hide_seek_env.py#L548)
+- Problem: Ursina view currently focuses on map primitives + agents; overlays such as room-light dimming, scent intensity and reveal ping are not yet rendered.
+- Impact: 3D view can diverge from game truth and mislead debugging.
+- Action:
+  1. add room-light darkening overlay;
+  2. add scent visualization;
+  3. add light-ping marker;
+  4. parity-check against Pygame frame semantics.
+
+### F2 — No automated tests for trainer/replay/Ursina integration paths
+
+- Location: [tests/test_env_core.py](tests/test_env_core.py)
+- Problem: tests cover core env only; critical trainer/replay/renderer regressions are unguarded.
+- Impact: fixes regress silently.
+- Action:
+  1.  add trainer smoke test (`--rollouts 1` equivalent);
+  2.  add replay schema validation tests;
+  3.  add renderer state-update unit tests (mock server handles).
+
+---
+
+## Status of previously tracked issues
+
+Previously listed critical/major/minor items from 2026-03-29 are treated as resolved and removed from this file.

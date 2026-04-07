@@ -102,6 +102,18 @@ class HideSeekRenderer:
         self.font_sm = pygame.font.SysFont("monospace", 11, bold=False)
         self.font_md = pygame.font.SysFont("monospace", 14, bold=True)
 
+    def _ensure_window_for_grid(self, grid_h: int, grid_w: int) -> None:
+        if self.screen is None:
+            return
+        if grid_h == self.grid_h and grid_w == self.grid_w:
+            return
+
+        self.grid_h = int(grid_h)
+        self.grid_w = int(grid_w)
+        self.win_w = self.grid_w * self.tile_px
+        self.win_h = self.grid_h * self.tile_px + self.HUD_HEIGHT
+        self.screen = pygame.display.set_mode((self.win_w, self.win_h))
+
     def draw(self, state: dict, fps: int = 30) -> bool:
         """
         Draw one frame. Returns False if the window was closed.
@@ -126,6 +138,10 @@ class HideSeekRenderer:
         grid      = state['grid']
         scent_map = state['scent_map']
         rooms     = state['rooms']
+        grid_h, grid_w = grid.shape
+        self._ensure_window_for_grid(grid_h, grid_w)
+
+        screen = cast(pygame.Surface, self.screen)
 
         # Build quick room-lit lookup
         lit_rooms = {r.room_id: r.light_on for r in rooms}
@@ -133,8 +149,8 @@ class HideSeekRenderer:
 
         # ── Tiles ────────────────────────────────────────────────────────────
         tp = self.tile_px
-        for r in range(self.grid_h):
-            for c in range(self.grid_w):
+        for r in range(grid_h):
+            for c in range(grid_w):
                 tile  = grid[r, c]
                 px, py = c * tp, r * tp + self.HUD_HEIGHT
 
@@ -161,10 +177,10 @@ class HideSeekRenderer:
 
         # ── Grid lines (subtle) ───────────────────────────────────────────────
         line_col = (30, 30, 40)
-        for r in range(0, self.grid_h + 1):
+        for r in range(0, grid_h + 1):
             y = r * tp + self.HUD_HEIGHT
             pygame.draw.line(screen, line_col, (0, y), (self.win_w, y))
-        for c in range(0, self.grid_w + 1):
+        for c in range(0, grid_w + 1):
             x = c * tp
             pygame.draw.line(screen, line_col, (x, self.HUD_HEIGHT),
                              (x, self.win_h))

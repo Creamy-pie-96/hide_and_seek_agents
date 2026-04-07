@@ -128,8 +128,30 @@ def render_state_to_frame(state: Dict[str, Any], tile_px: int = 10, hud_px: int 
 
 def write_mp4(path: Path, frames: Iterable[np.ndarray], fps: int = 12) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    import imageio.v2 as imageio
+    import importlib
+    imageio = importlib.import_module("imageio")
 
-    with imageio.get_writer(str(path), fps=fps, codec="libx264", quality=7) as writer:
+    def _pad_to_macro_block(frame: np.ndarray, macro_block_size: int = 16) -> np.ndarray:
+        if macro_block_size <= 1:
+            return frame
+        h, w = frame.shape[:2]
+        pad_h = (macro_block_size - (h % macro_block_size)) % macro_block_size
+        pad_w = (macro_block_size - (w % macro_block_size)) % macro_block_size
+        if pad_h == 0 and pad_w == 0:
+            return frame
+
+        if frame.ndim == 2:
+            return np.pad(frame, ((0, pad_h), (0, pad_w)), mode="edge")
+        if frame.ndim == 3:
+            return np.pad(frame, ((0, pad_h), (0, pad_w), (0, 0)), mode="edge")
+        return frame
+
+    with imageio.get_writer(
+        str(path),
+        fps=fps,
+        codec="libx264",
+        quality=7,
+        macro_block_size=16,
+    ) as writer:
         for frame in frames:
-            writer.append_data(frame)
+            writer.append_data(_pad_to_macro_block(frame, macro_block_size=16))

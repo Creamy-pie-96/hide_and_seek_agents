@@ -26,6 +26,7 @@ import numpy as np
 import random
 from dataclasses import dataclass, field
 from typing import List, Tuple, Optional, Dict
+from collections import deque
 from env.objects import ObjectState
 
 # ── Tile constants ──────────────────────────────────────────────────────────
@@ -368,6 +369,82 @@ class World:
     def get_room(self, r: int, c: int) -> Optional[Room]:
         rid = self.tile_to_room.get((r, c))
         return self.rooms[rid] if rid is not None else None
+
+    def shortest_path_distance(self,
+                               start: Tuple[int, int],
+                               goals: List[Tuple[int, int]],
+                               max_nodes: int = 8192) -> Optional[int]:
+        """Shortest walkable path distance from start to any goal (BFS)."""
+        if not goals:
+            return None
+        if start in goals:
+            return 0
+        sr, sc = start
+        if not self.is_walkable(sr, sc):
+            return None
+
+        goal_set = set(goals)
+        q = deque([(sr, sc, 0)])
+        seen = {(sr, sc)}
+        expanded = 0
+
+        while q and expanded < max_nodes:
+            r, c, d = q.popleft()
+            expanded += 1
+            for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                nr, nc = r + dr, c + dc
+                if (nr, nc) in seen:
+                    continue
+                if not self.is_walkable(nr, nc):
+                    continue
+                if (nr, nc) in goal_set:
+                    return d + 1
+                seen.add((nr, nc))
+                q.append((nr, nc, d + 1))
+        return None
+
+    def next_step_toward(self,
+                         start: Tuple[int, int],
+                         goals: List[Tuple[int, int]],
+                         max_nodes: int = 8192) -> Optional[Tuple[int, int]]:
+        """Return a next tile on a shortest walkable path from start to any goal."""
+        if not goals:
+            return None
+        if start in goals:
+            return start
+        sr, sc = start
+        if not self.is_walkable(sr, sc):
+            return None
+
+        goal_set = set(goals)
+        q = deque([(sr, sc)])
+        parent: Dict[Tuple[int, int], Optional[Tuple[int, int]]] = {(sr, sc): None}
+        expanded = 0
+        found: Optional[Tuple[int, int]] = None
+
+        while q and expanded < max_nodes:
+            r, c = q.popleft()
+            expanded += 1
+            for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                nr, nc = r + dr, c + dc
+                if (nr, nc) in parent:
+                    continue
+                if not self.is_walkable(nr, nc):
+                    continue
+                parent[(nr, nc)] = (r, c)
+                if (nr, nc) in goal_set:
+                    found = (nr, nc)
+                    q.clear()
+                    break
+                q.append((nr, nc))
+
+        if found is None:
+            return None
+
+        cur = found
+        while parent.get(cur) is not None and parent[cur] != (sr, sc):
+            cur = parent[cur]
+        return cur
 
     # ── Actions ──────────────────────────────────────────────────────────────
 

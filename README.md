@@ -1,6 +1,6 @@
 # hide_and_seek_agents
 
-Multi-agent hide-and-seek environment and MAPPO trainer (3v3) built with Python, PyTorch, and Pygame.
+Multi-agent hide-and-seek project with a model-free `sim2` backend (default) and a legacy MAPPO backend retained for migration.
 
 ## Quick start
 
@@ -11,17 +11,89 @@ Multi-agent hide-and-seek environment and MAPPO trainer (3v3) built with Python,
 pip install -r requirements.txt
 ```
 
-3. Train:
+3. Train (default `sim2` backend):
 
 ```bash
-python train.py --rollouts 500 --device cpu
+python train.py --rollouts 500 --sim-backend sim2 --sim2-renderer none
 ```
 
-4. Watch play:
+Headless `sim2` run:
 
 ```bash
-python play.py --load checkpoints/final.pt --episodes 5
+python train.py --rollouts 500 --sim-backend sim2 --no-render
 ```
+
+Legacy MAPPO training path (deprecated):
+
+```bash
+python train.py --sim-backend legacy --rollouts 500 --device cpu
+```
+
+Legacy MAPPO on GPU:
+
+```bash
+python train.py --sim-backend legacy --rollouts 500 --device cuda
+```
+
+4. Watch play (default `sim2`):
+
+```bash
+python play.py --sim-backend sim2 --episodes 5 --sim2-renderer none
+```
+
+Legacy policy play:
+
+```bash
+python play.py --sim-backend legacy --load checkpoints/final.pt --episodes 5
+```
+
+Replay playback:
+
+```bash
+python play.py --sim-backend sim2 --replay outputs/replays/<run_id>/iter_000025_ep_01.json
+```
+
+## Command help
+
+Both entrypoints already support `--help` via argparse:
+
+```bash
+python train.py --help
+python play.py --help
+```
+
+## Train flags
+
+- `--sim-backend {sim2,legacy}`: select simulator backend.
+- `--rollouts N`: number of training iterations/episodes.
+- `--no-render`: run headless (recommended for faster runs).
+- `--device {cpu,cuda}`: device for legacy MAPPO backend.
+- `--output-root PATH`: where logs/replays/videos/tensorboard are stored.
+- `--run-id ID`: explicit run id for artifact folders.
+- `--no-eval-video`: disable MP4 generation.
+- `--no-replay`: disable replay JSON generation.
+- `--tensorboard`: enable TensorBoard logging (legacy backend).
+
+## Play flags
+
+- `--sim-backend {sim2,legacy}`: choose backend for playback.
+- `--episodes N`: number of episodes to run.
+- `--replay PATH`: play a saved replay JSON.
+- `--load PATH`: load legacy model checkpoint and run policy playback.
+- `--fps N`: playback FPS.
+- `--sim2-renderer none`: sim2 playback mode (headless-compatible path).
+
+## Saved outputs and checkpoints
+
+Training writes artifacts under:
+
+- `outputs/logs/<run_id>/metrics.csv`
+- `outputs/eval_videos/<run_id>/*.mp4`
+- `outputs/replays/<run_id>/*.json`
+- `outputs/tensorboard/<run_id>/` (legacy with `--tensorboard`)
+- `checkpoints/final.pt` (legacy MAPPO model)
+
+These are kept so you can replay and inspect what the model learned later.
 
 ## Project layout
 
@@ -33,6 +105,8 @@ python play.py --load checkpoints/final.pt --episodes 5
 - [rl/memory.py](rl/memory.py): rollout memory and tensor conversion helpers
 - [rl/mappo.py](rl/mappo.py): trainer and PPO update loop
 - [render/pygame_render.py](render/pygame_render.py): visualization
+- [sim2/core.py](sim2/core.py): model-free simulator core
+- [rl/sim2_runner.py](rl/sim2_runner.py): headless-first rollout runner + artifact generation
 
 ## Mechanics currently implemented
 
@@ -61,6 +135,21 @@ python -m py_compile env/world.py env/objects.py env/agent.py env/hide_seek_env.
 python -m unittest discover -s tests -p 'test_*.py'
 ```
 
+## Monitoring outputs
+
+Training now writes experiment artifacts under:
+
+- outputs/logs/<run_id>/metrics.csv
+- outputs/eval_videos/<run_id>/<iteration>.mp4
+- outputs/replays/<run*id>/iter*<iteration>_ep_<episode>.json
+- outputs/tensorboard/<run_id>/
+
+Launch TensorBoard:
+
+```bash
+tensorboard --logdir outputs/tensorboard
+```
+
 ## Notes
 
 - Checkpoints are expected to be trusted project-generated files.
@@ -69,7 +158,7 @@ python -m unittest discover -s tests -p 'test_*.py'
 Common commands:
 
 ```bash
-python train.py                              # train + watch live
-python train.py --no-render                  # faster headless training
-python play.py --load checkpoints/final.pt   # watch trained agents
+python train.py --sim-backend sim2 --rollouts 100 --no-render
+python train.py --sim-backend legacy --rollouts 100 --device cuda
+python play.py --sim-backend sim2 --replay outputs/replays/<run_id>/<file>.json
 ```

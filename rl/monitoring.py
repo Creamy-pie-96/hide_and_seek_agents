@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 import csv
 import json
+import time
 from datetime import datetime
 
 
@@ -49,18 +50,33 @@ def prepare_artifacts(output_root: str, run_id: str) -> RunArtifacts:
 
 
 class CSVMetricLogger:
+    _FLUSH_INTERVAL = 5.0  # seconds between forced flushes
+
     def __init__(self, csv_path: Path):
         self.csv_path = csv_path
         self._fieldnames = [
             "timestamp",
             "run_id",
+            "row_type",
             "rollout",
             "train_team",
             "total_steps",
             "rollout_steps",
             "completed_episodes_in_rollout",
+            "episode_index",
+            "episode_length",
+            "ep_h_return",
+            "ep_s_return",
+            "agent_return_0",
+            "agent_return_1",
+            "agent_return_2",
+            "agent_return_3",
+            "agent_return_4",
+            "agent_return_5",
             "h_return_last10",
             "s_return_last10",
+            "lr_h",
+            "lr_s",
             "h_pg_loss",
             "h_vf_loss",
             "h_entropy",
@@ -73,19 +89,26 @@ class CSVMetricLogger:
             "eval_hiders_caught",
             "eval_video",
             "eval_replay",
+            "eval_error",
         ]
         self._fp = self.csv_path.open("a", newline="", encoding="utf-8")
         self._writer = csv.DictWriter(self._fp, fieldnames=self._fieldnames)
         if self.csv_path.stat().st_size == 0:
             self._writer.writeheader()
             self._fp.flush()
+        self._last_flush = time.monotonic()
 
     def log(self, row: Dict[str, Any]) -> None:
         payload = {k: row.get(k, "") for k in self._fieldnames}
         self._writer.writerow(payload)
-        self._fp.flush()
+        # P2 fix: buffered flush — only flush periodically, not every row.
+        now = time.monotonic()
+        if now - self._last_flush >= self._FLUSH_INTERVAL:
+            self._fp.flush()
+            self._last_flush = now
 
     def close(self) -> None:
+        self._fp.flush()
         self._fp.close()
 
 
