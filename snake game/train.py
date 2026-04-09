@@ -1,4 +1,4 @@
-from snake_game.train import main
+from snake_game.ppo_train import main
 
 
 if __name__ == "__main__":

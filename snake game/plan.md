@@ -1,59 +1,51 @@
-# RL Snake Project Plan (Advanced Architecture)
+# Snake RL PPO Architecture Plan
 
-## 1. Objective
-Develop a Reinforcement Learning agent capable of playing the Snake game, optimizing for maximum length and survival time. The agent will use a Convolutional Neural Network (CNN) to process spatial board data and a Deep Q-Network (DQN) for decision making.
+## 1) Current architecture
 
-## 2. Environment Setup
-- **Simulation Engine**:`Pygame` for the game loop.
-- **Grid**: A fixed-size grid (e.g., 20x20).
-- **Observation Space (Spatial Grid)**:
-    Instead of a flat vector, the agent receives a 3-channel tensor of shape `(20, 20, 3)`:
-    - **Channel 1**: Binary mask of the snake's head (1 at head, 0 elsewhere).
-    - **Channel 2**: Binary mask of the snake's body (1 at body, 0 elsewhere).
-    - **Channel 3**: Binary mask of the food location (1 at food, 0 elsewhere).
-    This allows the CNN to learn spatial patterns, such as "pockets" or "traps."
+- PPO training loop with CNN actor-critic and GAE in [snake_game/ppo_train.py](snake_game/ppo_train.py)
+- Agent optimization and checkpointing in [snake_game/ppo_agent.py](snake_game/ppo_agent.py)
+- Environment with optional static opponent in [snake_game/env_v2.py](snake_game/env_v2.py)
+- Training/play wrappers in [train.py](train.py), [play.py](play.py)
 
-## 3. Action Space
-Relative movement to prevent illegal 180-degree turns:
-- `0`: Continue Straight
-- `1`: Turn Right
-- `2`: Turn Left
+## 2) Acceptance criteria (active)
 
-## 4. Reward Function
-| Event | Reward | Reasoning |
-| :--- | :--- | :--- |
-| **Eating Food** | `+10.0` | Primary goal; strong positive reinforcement. |
-| **Collision (Wall/Self)** | `-10.0` | Terminal state; strong negative reinforcement. |
-| **Moving Towards Food** | `+0.1` | Reward shaping to guide the agent in early training. |
-| **Moving Away from Food** | `-0.1` | Discourage wandering. |
-| **Step Penalty** | `-0.01` | Encourages finding the shortest path to food. |
-| **Stalling/Looping** | `-0.5` | Penalty for visiting the same coordinates repeatedly without eating. |
+Training considered healthy when all are met:
 
-## 5. RL Architecture (CNN-DQN)
-- **Network**: Convolutional Neural Network (CNN).
-    - **Input**: `(20, 20, 3)` tensor.
-    - **Conv Layer 1**: 32 filters (3x3), ReLU activation, stride 1.
-    - **Conv Layer 2**: 64 filters (3x3), ReLU activation, stride 1.
-    - **Flatten Layer**: Converts 2D feature maps to a 1D vector.
-    - **Dense Layer 1**: 128 neurons, ReLU activation.
-    - **Output Layer**: 3 neurons (Q-values for Straight, Right, Left).
-- **Hyperparameters**:
-    - **Learning Rate**: $1 \\times 10^{-4}$
-    - **Discount Factor ($\\gamma$)**: 0.99
-    - **Epsilon ($\\epsilon$)**: Start at 1.0, decay to 0.01.
-    - **Experience Replay**: Buffer size of 100,000 transitions.
-    - **Batch Size**: 64.
+1. `eval_avg_score >= 1.5` by episode 500
+2. `eval_avg_score >= 3.0` by episode 1500
+3. non-zero score in >35% eval episodes
+4. no dominant looping pattern in visual replay
 
-## 6. Implementation Phases
-### Phase 1: Environment
-- Implement Snake logic and the 3-channel grid observation wrapper.
-### Phase 2: Agent Development
-- Implement the CNN architecture and the Replay Buffer.
-- Implement $\\epsilon$-greedy action selection.
-### Phase 3: Training
-- Train in "headless" mode for speed.
-- Log average score and episode length.
-### Phase 4: Visualization
-- Enable simulation render to observe spatial reasoning (e.g., avoiding self-trapping).
+If not met by episode 1500, tune curriculum/entropy/self-play parameters before scaling training budget.
 
-**Summary: By switching to a CNN with a grid-based observation space, the agent gains spatial awareness, allowing it to recognize complex board configurations that a simple MLP would miss.**
+---
+
+## 3) Execution steps (implemented + next)
+
+1. ✅ Resume from checkpoint (`--resume`) with trainer-state restore.
+2. ✅ Adaptive entropy controller with bounded updates.
+3. ✅ Proficiency-based curriculum manager (promotion by sustained eval).
+4. ✅ Static opponent mode (`heuristic`, `last_best`) for competition pressure.
+5. 🔄 Run 3-seed sweeps and compare eval-score variance.
+6. 🔄 Add automated tests for resume continuity and entropy-controller behavior.
+
+---
+
+## 4) Default tuned PPO run template
+
+Example target settings:
+
+- `episodes=2500`
+- `self-play=true`, `self-play-mode=heuristic` (or `last_best` after baseline)
+- `use-adaptive-entropy=true`
+- `use-curriculum=true`, `curriculum-promote-streak=3`
+- evaluate every 25 episodes, 10 eval episodes each
+
+---
+
+## 5) Deliverables
+
+- updated trainer logs with train + eval metrics
+- replay files for first/best/last eval episodes
+- side-by-side comparison report: baseline PPO vs self-play PPO
+- final recommendation with reproducible command set

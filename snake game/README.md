@@ -1,6 +1,6 @@
-# Snake RL (CNN-DQN)
+# Snake RL (CNN-PPO)
 
-This folder is a standalone sub-project for training a Snake agent with a CNN-based DQN.
+This folder is a standalone sub-project for training a Snake agent with a CNN-based PPO policy.
 
 ## Features
 
@@ -12,24 +12,18 @@ This folder is a standalone sub-project for training a Snake agent with a CNN-ba
   - `0`: straight
   - `1`: right turn
   - `2`: left turn
-- Reward shaping:
-  - eat food: `+10`
-  - collision: `-10`
-  - move toward food: `+0.1`
-  - move away from food: `-0.1`
-  - step penalty: `-0.01`
-  - loop/stall penalty: `-0.5`
-- Efficient replay buffer with uint8 storage.
-- Double DQN target computation + periodic target updates.
+- PPO actor-critic with GAE($\lambda$), clipping, entropy regularization.
+- Vectorized environment rollout collection.
+- Reward shaping + progressive hunger penalties.
+- Deterministic evaluation loop and replay export for first/best/last eval episodes.
 
 ## Structure
 
 - [snake_game/env.py](snake_game/env.py): Snake environment + pygame render
-- [snake_game/model.py](snake_game/model.py): CNN Q-network
-- [snake_game/replay.py](snake_game/replay.py): replay buffer
-- [snake_game/agent.py](snake_game/agent.py): DQN agent logic
-- [snake_game/train.py](snake_game/train.py): training entry logic
-- [snake_game/play.py](snake_game/play.py): inference/play loop
+- [snake_game/ppo_model.py](snake_game/ppo_model.py): CNN actor-critic model
+- [snake_game/ppo_agent.py](snake_game/ppo_agent.py): PPO optimization logic
+- [snake_game/ppo_train.py](snake_game/ppo_train.py): PPO training + eval + replay export
+- [snake_game/ppo_play.py](snake_game/ppo_play.py): PPO inference/play loop
 - [train.py](train.py): wrapper entrypoint
 - [play.py](play.py): wrapper entrypoint
 
@@ -38,7 +32,7 @@ This folder is a standalone sub-project for training a Snake agent with a CNN-ba
 From this folder ([snake game](.)):
 
 - Train:
-  - `/home/DATA/CODE/code/hide_and_seek/.venv/bin/python train.py --episodes 1500`
+  - `/home/DATA/CODE/code/hide_and_seek/.venv/bin/python train.py --episodes 3000 --device cuda`
 - Play:
   - `/home/DATA/CODE/code/hide_and_seek/.venv/bin/python play.py --checkpoint ./checkpoints/final.pt`
 
@@ -53,25 +47,19 @@ Both programs include full `--help` output with examples and flag descriptions.
 
 ## Training flags (`train.py`)
 
-| Flag                      | Default  | What it does                                                |
-| :------------------------ | :------- | :---------------------------------------------------------- |
-| `--episodes`              | `1500`   | Number of episodes to train.                                |
-| `--grid-size`             | `20`     | Board size $N$ for an $N \times N$ grid.                    |
-| `--max-steps-per-episode` | `4000`   | Max steps allowed in one episode.                           |
-| `--lr`                    | `1e-4`   | Adam learning rate.                                         |
-| `--gamma`                 | `0.99`   | Discount factor for future rewards.                         |
-| `--batch-size`            | `64`     | Minibatch size sampled from replay buffer.                  |
-| `--replay-capacity`       | `100000` | Replay buffer maximum transitions.                          |
-| `--warmup-steps`          | `2000`   | Minimum stored transitions before optimization starts.      |
-| `--target-update-steps`   | `1000`   | How often to copy online network weights to target network. |
-| `--eps-start`             | `1.0`    | Initial epsilon for epsilon-greedy exploration.             |
-| `--eps-end`               | `0.01`   | Final epsilon floor after decay.                            |
-| `--eps-decay-steps`       | `200000` | Environment steps over which epsilon decays linearly.       |
-| `--save-every`            | `50`     | Save checkpoint every N episodes.                           |
-| `--log-every`             | `10`     | Print training logs every N episodes.                       |
-| `--out-dir`               | `.`      | Output root; writes `checkpoints/` and `logs/` inside it.   |
-| `--seed`                  | `42`     | Random seed for reproducibility.                            |
-| `--device`                | `auto`   | Compute device: `auto`, `cpu`, `cuda`, `cuda:0`, etc.       |
+PPO training now includes:
+
+- core PPO args (`--n-envs`, `--rollout-steps`, `--update-epochs`, `--clip-coef`, `--ent-coef`, etc.)
+- reward shaping args (`--distance-reward-toward`, `--distance-penalty-away`, `--idle-step-coeff`, etc.)
+- evaluation args (`--eval-every`, `--eval-episodes`)
+- resume args (`--resume`, `--resume-reset-optim`)
+- adaptive entropy controller args (`--use-adaptive-entropy`, `--entropy-min`, `--entropy-max`, ...)
+- proficiency curriculum args (`--use-curriculum`, `--curriculum-promote-streak`)
+- static opponent/self-play args (`--self-play`, `--self-play-mode heuristic|last_best`, `--opponent-food-penalty`)
+
+Use built-in help for the full list:
+
+- `/home/DATA/CODE/code/hide_and_seek/.venv/bin/python train.py --help`
 
 ## Play flags (`play.py`)
 
@@ -83,7 +71,12 @@ Both programs include full `--help` output with examples and flag descriptions.
 | `--fps`        | `12`                     | Render speed (frames per second).                     |
 | `--max-steps`  | `4000`                   | Max steps per play episode.                           |
 | `--device`     | `auto`                   | Compute device: `auto`, `cpu`, `cuda`, `cuda:0`, etc. |
+| `--stochastic` | `False`                  | Sample action from policy instead of greedy action.   |
 
 ## Quick smoke test
 
-- `/home/DATA/CODE/code/hide_and_seek/.venv/bin/python train.py --episodes 5 --max-steps-per-episode 200 --warmup-steps 64 --save-every 5 --log-every 1`
+`cd "/home/DATA/CODE/code/hide_and_seek/snake game" && /home/DATA/CODE/code/hide_and_seek/.venv/bin/python train.py --episodes 40 --n-envs 4 --rollout-steps 128 --update-epochs 2 --minibatch-size 256 --eval-every 20 --eval-episodes 4 --save-every 40 --log-every 10 --device cuda`
+
+## Resume training example
+
+`cd "/home/DATA/CODE/code/hide_and_seek/snake game" && /home/DATA/CODE/code/hide_and_seek/.venv/bin/python train.py --episodes 5000 --resume checkpoints/final.pt --self-play --self-play-mode last_best`

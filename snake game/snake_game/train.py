@@ -36,7 +36,21 @@ class TrainConfig:
     # Epsilon schedule
     eps_start: float = 1.0
     eps_end: float = 0.01
-    eps_decay_steps: int = 200_000
+    eps_decay_steps: int = 80_000
+
+    # Environment reward shaping
+    max_steps_factor: int = 100
+    loop_visit_threshold: int = 3
+    loop_visit_penalty: float = -0.10
+    food_reward: float = 10.0
+    death_penalty: float = -10.0
+    distance_reward_toward: float = 0.1
+    distance_penalty_away: float = -0.05
+    idle_step_coeff: float = 0.001
+    hunger_exp_base: float = 0.0
+    hunger_exp_gamma: float = 1.005
+    hunger_exp_max: float = 1.0
+    step_limit_penalty: float = 0.0
 
     # IO
     save_every: int = 50
@@ -77,7 +91,22 @@ def train(cfg: TrainConfig) -> str:
     os.makedirs(ckpt_dir, exist_ok=True)
     os.makedirs(log_dir, exist_ok=True)
 
-    env = SnakeEnv(grid_size=cfg.grid_size, seed=cfg.seed)
+    env = SnakeEnv(
+        grid_size=cfg.grid_size,
+        seed=cfg.seed,
+        max_steps_factor=cfg.max_steps_factor,
+        loop_visit_threshold=cfg.loop_visit_threshold,
+        loop_visit_penalty=cfg.loop_visit_penalty,
+        food_reward=cfg.food_reward,
+        death_penalty=cfg.death_penalty,
+        distance_reward_toward=cfg.distance_reward_toward,
+        distance_penalty_away=cfg.distance_penalty_away,
+        idle_step_coeff=cfg.idle_step_coeff,
+        hunger_exp_base=cfg.hunger_exp_base,
+        hunger_exp_gamma=cfg.hunger_exp_gamma,
+        hunger_exp_max=cfg.hunger_exp_max,
+        step_limit_penalty=cfg.step_limit_penalty,
+    )
     agent = DQNAgent(
         grid_size=cfg.grid_size,
         device=device,
@@ -200,9 +229,22 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--eps-decay-steps",
         type=int,
-        default=200_000,
+        default=80_000,
         help="Number of environment steps over which epsilon decays linearly",
     )
+
+    p.add_argument("--max-steps-factor", type=int, default=100, help="Episode truncation factor: max_steps = factor * snake_length")
+    p.add_argument("--loop-visit-threshold", type=int, default=3, help="Apply loop penalty when revisiting same cell at or above this count")
+    p.add_argument("--loop-visit-penalty", type=float, default=-0.10, help="Penalty for revisiting same cell too often")
+    p.add_argument("--food-reward", type=float, default=10.0, help="Reward for eating food")
+    p.add_argument("--death-penalty", type=float, default=-10.0, help="Penalty for wall/self collision")
+    p.add_argument("--distance-reward-toward", type=float, default=0.1, help="Reward when move reduces Manhattan distance to food")
+    p.add_argument("--distance-penalty-away", type=float, default=-0.05, help="Penalty when move increases Manhattan distance to food")
+    p.add_argument("--idle-step-coeff", type=float, default=0.001, help="Linear hunger penalty coefficient: -coeff * steps_since_food")
+    p.add_argument("--hunger-exp-base", type=float, default=0.0, help="Base coefficient for exponential hunger penalty")
+    p.add_argument("--hunger-exp-gamma", type=float, default=1.005, help="Growth factor (>1) for exponential hunger penalty")
+    p.add_argument("--hunger-exp-max", type=float, default=1.0, help="Upper cap for exponential hunger penalty")
+    p.add_argument("--step-limit-penalty", type=float, default=0.0, help="Penalty when episode ends by step limit")
 
     p.add_argument("--save-every", type=int, default=50, help="Save checkpoint every N episodes")
     p.add_argument("--log-every", type=int, default=10, help="Print training log every N episodes")
@@ -237,6 +279,18 @@ def main() -> None:
         eps_start=args.eps_start,
         eps_end=args.eps_end,
         eps_decay_steps=args.eps_decay_steps,
+        max_steps_factor=args.max_steps_factor,
+        loop_visit_threshold=args.loop_visit_threshold,
+        loop_visit_penalty=args.loop_visit_penalty,
+        food_reward=args.food_reward,
+        death_penalty=args.death_penalty,
+        distance_reward_toward=args.distance_reward_toward,
+        distance_penalty_away=args.distance_penalty_away,
+        idle_step_coeff=args.idle_step_coeff,
+        hunger_exp_base=args.hunger_exp_base,
+        hunger_exp_gamma=args.hunger_exp_gamma,
+        hunger_exp_max=args.hunger_exp_max,
+        step_limit_penalty=args.step_limit_penalty,
         save_every=args.save_every,
         log_every=args.log_every,
         out_dir=args.out_dir,
