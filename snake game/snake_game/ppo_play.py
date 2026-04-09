@@ -35,8 +35,8 @@ def run(
     terminal_loss_penalty: float = -3.0,
     starvation_steps_factor: int = 60,
     starvation_penalty: float = -6.0,
-    wall_follow_threshold: int = 10,
-    wall_follow_penalty: float = -0.04,
+    wall_follow_threshold: int = 6,
+    wall_follow_penalty: float = -0.12,
 ) -> None:
     dev = torch.device("cuda" if device == "auto" and torch.cuda.is_available() else device)
 
@@ -115,8 +115,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--terminal-loss-penalty", type=float, default=-3.0)
     p.add_argument("--starvation-steps-factor", type=int, default=60)
     p.add_argument("--starvation-penalty", type=float, default=-6.0)
-    p.add_argument("--wall-follow-threshold", type=int, default=10)
-    p.add_argument("--wall-follow-penalty", type=float, default=-0.04)
+    p.add_argument("--wall-follow-threshold", type=int, default=6)
+    p.add_argument("--wall-follow-penalty", type=float, default=-0.12)
     return p
 
 

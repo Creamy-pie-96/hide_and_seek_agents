@@ -42,6 +42,7 @@ class SnakeEnv:
         death_penalty: float = -8.0,
         distance_reward_toward: float = 0.05,
         distance_penalty_away: float = -0.1,
+        stagnation_penalty: float = 0.0,
         survival_reward: float = 0.002,
         idle_step_coeff: float = 0.0,
         hunger_exp_base: float = 0.0,
@@ -73,6 +74,7 @@ class SnakeEnv:
         self.death_penalty = float(death_penalty)
         self.distance_reward_toward = float(distance_reward_toward)
         self.distance_penalty_away = float(distance_penalty_away)
+        self.stagnation_penalty = float(stagnation_penalty)
         self.survival_reward = float(survival_reward)
         self.idle_step_coeff = float(idle_step_coeff)
         self.hunger_exp_base = float(hunger_exp_base)
@@ -378,6 +380,8 @@ class SnakeEnv:
                 reward += self.distance_reward_toward
             elif after_dist > before_dist:
                 reward += self.distance_penalty_away
+            else:
+                reward += self.stagnation_penalty
 
             count = self.visit_counts.get(new_head, 0) + 1
             self.visit_counts[new_head] = count
@@ -532,6 +536,7 @@ class SnakeEnv:
         max_steps_factor: int | None = None,
         distance_reward_toward: float | None = None,
         distance_penalty_away: float | None = None,
+        stagnation_penalty: float | None = None,
         loop_visit_penalty: float | None = None,
         step_limit_penalty: float | None = None,
         starvation_steps_factor: int | None = None,
@@ -556,6 +561,8 @@ class SnakeEnv:
             self.distance_reward_toward = float(distance_reward_toward)
         if distance_penalty_away is not None:
             self.distance_penalty_away = float(distance_penalty_away)
+        if stagnation_penalty is not None:
+            self.stagnation_penalty = float(stagnation_penalty)
         if loop_visit_penalty is not None:
             self.loop_visit_penalty = float(loop_visit_penalty)
         if step_limit_penalty is not None:

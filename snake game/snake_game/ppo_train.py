@@ -48,18 +48,19 @@ class TrainPPOConfig:
     loop_visit_penalty: float = -0.03
     food_reward: float = 15.0
     death_penalty: float = -8.0
-    distance_reward_toward: float = 0.05
+    distance_reward_toward: float = 0.2
     distance_penalty_away: float = -0.1
-    survival_reward: float = 0.0
+    stagnation_penalty: float = 0.0
+    survival_reward: float = -0.003
     idle_step_coeff: float = 0.0
-    hunger_exp_base: float = 0.0
-    hunger_exp_gamma: float = 1.005
-    hunger_exp_max: float = 0.5
-    step_limit_penalty: float = -1.0
-    starvation_steps_factor: int = 60
-    starvation_penalty: float = -6.0
-    wall_follow_threshold: int = 10
-    wall_follow_penalty: float = -0.04
+    hunger_exp_base: float = 0.005
+    hunger_exp_gamma: float = 1.02
+    hunger_exp_max: float = 3.0
+    step_limit_penalty: float = -8.0
+    starvation_steps_factor: int = 55
+    starvation_penalty: float = -5.0
+    wall_follow_threshold: int = 5
+    wall_follow_penalty: float = -0.2
     obstacle_count: int = 0
     moving_obstacles: bool = False
     obstacle_move_period: int = 8
@@ -68,17 +69,17 @@ class TrainPPOConfig:
 
     # training strategy
     use_curriculum: bool = True
-    curriculum_promote_streak: int = 3
+    curriculum_promote_streak: int = 4
     curriculum_prev_mix_prob: float = 0.25
 
     # adaptive entropy control
     use_adaptive_entropy: bool = True
-    entropy_min: float = 1e-3
+    entropy_min: float = 1.5e-3
     entropy_max: float = 2e-2
-    entropy_up_step: float = 7.5e-4
+    entropy_up_step: float = 1.2e-3
     entropy_down_step: float = 4e-4
     entropy_plateau_patience: int = 2
-    pro_entropy_floor: float = 0.0012
+    pro_entropy_floor: float = 0.0018
     use_regression_rollback: bool = False
 
     # self-play/static opponent
@@ -109,6 +110,15 @@ def seed_everything(seed: int) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+    try:
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+    except Exception:
+        pass
+    try:
+        torch.use_deterministic_algorithms(True, warn_only=True)
+    except Exception:
+        pass
 
 
 def resolve_device(name: str) -> torch.device:
@@ -141,66 +151,72 @@ class CurriculumManager:
         self.demote_streak = 4
         self.demote_margin = 1.6
         self.level_entry_episode = 0
-        self.min_margin_by_level = [-999.0, -999.0, -999.0, -999.0, -2.0]
+        self.min_margin_by_level = [-999.0, -999.0, -999.0, -999.0, -1.5]
+        self.max_step_limit_rate_by_level = [0.85, 0.75, 0.65, 0.60, 0.55]
+        self.min_food_per_100_by_level = [0.30, 0.40, 0.50, 0.60, 0.70]
         self.levels = [
             {
                 "name": "solo_static_food",
-                "score_threshold": 1.5,
+                "score_threshold": 0.55,
                 "params": {
                     "opponent_mode": "none",
                     "obstacle_count": 0,
                     "moving_obstacles": False,
                     "moving_food": False,
-                    "max_steps_factor": 50,
+                    "max_steps_factor": 55,
+                    "starvation_steps_factor": 52,
                     "food_spawn_radius": 5,
                     "loop_visit_penalty": -0.01,
                 },
             },
             {
                 "name": "solo_static_blocks",
-                "score_threshold": 2.0,
+                "score_threshold": 0.65,
                 "params": {
                     "opponent_mode": "none",
-                    "obstacle_count": 10,
+                    "obstacle_count": 6,
                     "moving_obstacles": False,
                     "moving_food": False,
                     "max_steps_factor": 60,
-                    "food_spawn_radius": 4,
+                    "starvation_steps_factor": 50,
+                    "food_spawn_radius": 5,
                     "loop_visit_penalty": -0.015,
                 },
             },
             {
                 "name": "solo_moving_blocks",
-                "score_threshold": 2.2,
+                "score_threshold": 0.80,
                 "params": {
                     "opponent_mode": "none",
-                    "obstacle_count": 10,
+                    "obstacle_count": 8,
                     "moving_obstacles": True,
-                    "obstacle_move_period": 8,
+                    "obstacle_move_period": 10,
                     "moving_food": False,
                     "max_steps_factor": 70,
+                    "starvation_steps_factor": 48,
                     "food_spawn_radius": 3,
                     "loop_visit_penalty": -0.02,
                 },
             },
             {
                 "name": "solo_moving_blocks_food",
-                "score_threshold": 2.5,
+                "score_threshold": 1.00,
                 "params": {
                     "opponent_mode": "none",
                     "obstacle_count": 10,
                     "moving_obstacles": True,
-                    "obstacle_move_period": 7,
+                    "obstacle_move_period": 9,
                     "moving_food": True,
-                    "food_move_prob": 0.10,
+                    "food_move_prob": 0.08,
                     "max_steps_factor": 80,
+                    "starvation_steps_factor": 46,
                     "food_spawn_radius": 3,
                     "loop_visit_penalty": -0.02,
                 },
             },
             {
                 "name": "competitive",
-                "score_threshold": 2.0,
+                "score_threshold": 1.20,
                 "params": {
                     "opponent_mode": "heuristic",
                     "obstacle_count": 10,
@@ -209,6 +225,7 @@ class CurriculumManager:
                     "moving_food": True,
                     "food_move_prob": 0.10,
                     "max_steps_factor": 100,
+                    "starvation_steps_factor": 48,
                     "food_spawn_radius": 5,
                     "loop_visit_penalty": -0.015,
                     "opponent_food_penalty": -0.10,
@@ -224,17 +241,31 @@ class CurriculumManager:
         idx = int(np.clip(level, 0, len(self.levels) - 1))
         return dict(self.levels[idx]["params"])
 
-    def on_eval(self, eval_avg_score: float, episode_now: int, eval_avg_margin: float | None = None) -> tuple[bool, str]:
+    def on_eval(
+        self,
+        eval_avg_score: float,
+        episode_now: int,
+        eval_avg_margin: float | None = None,
+        eval_step_limit_rate: float | None = None,
+        eval_food_per_100_steps: float | None = None,
+    ) -> tuple[bool, str]:
         self.eval_ema = self.eval_ema_alpha * float(eval_avg_score) + (1.0 - self.eval_ema_alpha) * self.eval_ema
         threshold = float(self.levels[self.level]["score_threshold"])
         margin_ok = True
+        quality_ok = True
         if eval_avg_margin is not None:
             min_margin = float(self.min_margin_by_level[min(self.level, len(self.min_margin_by_level) - 1)])
             margin_ok = float(eval_avg_margin) >= min_margin
+        if eval_step_limit_rate is not None:
+            max_step_limit = float(self.max_step_limit_rate_by_level[min(self.level, len(self.max_step_limit_rate_by_level) - 1)])
+            quality_ok = quality_ok and (float(eval_step_limit_rate) <= max_step_limit)
+        if eval_food_per_100_steps is not None:
+            min_food_rate = float(self.min_food_per_100_by_level[min(self.level, len(self.min_food_per_100_by_level) - 1)])
+            quality_ok = quality_ok and (float(eval_food_per_100_steps) >= min_food_rate)
 
-        if self.eval_ema >= threshold and margin_ok:
+        if self.eval_ema >= threshold and margin_ok and quality_ok:
             self.fail_streak = 0
-        elif self.level > 0 and self.eval_ema < (threshold - self.demote_margin):
+        elif self.level > 0 and (self.eval_ema < (threshold - self.demote_margin) or not quality_ok):
             self.fail_streak += 1
         else:
             self.fail_streak = max(0, self.fail_streak - 1)
@@ -251,7 +282,7 @@ class CurriculumManager:
 
         if int(episode_now) - self.level_entry_episode < self.min_level_episodes:
             return False, "hold_min_level_time"
-        if self.eval_ema >= threshold and margin_ok:
+        if self.eval_ema >= threshold and margin_ok and quality_ok:
             self.streak += 1
         else:
             self.streak = max(0, self.streak - 1)
@@ -329,6 +360,7 @@ class SyncVecSnake:
                 death_penalty=cfg.death_penalty,
                 distance_reward_toward=cfg.distance_reward_toward,
                 distance_penalty_away=cfg.distance_penalty_away,
+                stagnation_penalty=cfg.stagnation_penalty,
                 survival_reward=cfg.survival_reward,
                 idle_step_coeff=cfg.idle_step_coeff,
                 hunger_exp_base=cfg.hunger_exp_base,
@@ -458,6 +490,8 @@ def evaluate(
     rewards_list: list[float] = []
     steps_list: list[int] = []
     margins: list[float] = []
+    terminal_reasons: list[str] = []
+    foods_per_100: list[float] = []
 
     for ep in range(episodes):
         env = SnakeEnv(
@@ -470,6 +504,7 @@ def evaluate(
             death_penalty=cfg.death_penalty,
             distance_reward_toward=cfg.distance_reward_toward,
             distance_penalty_away=cfg.distance_penalty_away,
+            stagnation_penalty=cfg.stagnation_penalty,
             survival_reward=cfg.survival_reward,
             idle_step_coeff=cfg.idle_step_coeff,
             hunger_exp_base=cfg.hunger_exp_base,
@@ -527,6 +562,8 @@ def evaluate(
                 margins.append(float(int(info["score"]) - int(info.get("opponent_score", 0))))
                 rewards_list.append(float(ep_reward))
                 steps_list.append(int(t))
+                terminal_reasons.append(str(info.get("reason", "unknown")))
+                foods_per_100.append(100.0 * float(info["score"]) / max(1.0, float(t)))
                 traces.append(
                     {
                         "episode_index": ep,
@@ -549,6 +586,9 @@ def evaluate(
         "eval_avg_reward": float(np.mean(rewards_list)) if rewards_list else 0.0,
         "eval_avg_steps": float(np.mean(steps_list)) if steps_list else 0.0,
         "eval_avg_margin": float(np.mean(margins)) if margins else 0.0,
+        "eval_food_per_100_steps": float(np.mean(foods_per_100)) if foods_per_100 else 0.0,
+        "eval_step_limit_rate": float(np.mean([1.0 if r == "step_limit" else 0.0 for r in terminal_reasons])) if terminal_reasons else 0.0,
+        "eval_starvation_rate": float(np.mean([1.0 if r == "starvation" else 0.0 for r in terminal_reasons])) if terminal_reasons else 0.0,
         "eval_best_score": int(np.max(scores)) if scores else 0,
     }
     picked = {
@@ -702,6 +742,9 @@ def train(cfg: TrainPPOConfig) -> str:
                 "eval_avg_reward",
                 "eval_avg_steps",
                 "eval_avg_margin",
+                "eval_food_per_100_steps",
+                "eval_step_limit_rate",
+                "eval_starvation_rate",
             ]
         )
 
@@ -799,7 +842,15 @@ def train(cfg: TrainPPOConfig) -> str:
             losses = agent.update(flat, ent_coef_override=ent_coef_now)
             updates += 1
 
-            eval_metrics = {"eval_avg_score": "", "eval_avg_reward": "", "eval_avg_steps": "", "eval_avg_margin": ""}
+            eval_metrics = {
+                "eval_avg_score": "",
+                "eval_avg_reward": "",
+                "eval_avg_steps": "",
+                "eval_avg_margin": "",
+                "eval_food_per_100_steps": "",
+                "eval_step_limit_rate": "",
+                "eval_starvation_rate": "",
+            }
             while episodes_done >= next_eval_episode:
                 m, picked = evaluate(
                     agent,
@@ -817,12 +868,20 @@ def train(cfg: TrainPPOConfig) -> str:
                         float(m["eval_avg_score"]),
                         episodes_done,
                         eval_avg_margin=float(m.get("eval_avg_margin", 0.0)),
+                        eval_step_limit_rate=float(m.get("eval_step_limit_rate", 1.0)),
+                        eval_food_per_100_steps=float(m.get("eval_food_per_100_steps", 0.0)),
                     )
 
                 if cfg.use_adaptive_entropy:
                     entropy_ctrl.update_from_eval(float(m["eval_avg_score"]), float(losses.get("entropy", 0.0)))
 
-                model_score = float(m["eval_avg_score"]) + 0.1 * float(m.get("eval_avg_margin", 0.0))
+                model_score = (
+                    float(m["eval_avg_score"])
+                    + 0.1 * float(m.get("eval_avg_margin", 0.0))
+                    + 0.02 * float(m.get("eval_food_per_100_steps", 0.0))
+                    - 0.25 * float(m.get("eval_step_limit_rate", 0.0))
+                    - 0.15 * float(m.get("eval_starvation_rate", 0.0))
+                )
                 if model_score > best_model_score:
                     best_model_score = model_score
                     best_eval_score = m["eval_avg_score"]
@@ -921,6 +980,9 @@ def train(cfg: TrainPPOConfig) -> str:
                     eval_metrics["eval_avg_reward"],
                     eval_metrics["eval_avg_steps"],
                     eval_metrics["eval_avg_margin"],
+                    eval_metrics["eval_food_per_100_steps"],
+                    eval_metrics["eval_step_limit_rate"],
+                    eval_metrics["eval_starvation_rate"],
                 ]
             )
 
@@ -999,18 +1061,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--loop-visit-penalty", type=float, default=-0.03)
     p.add_argument("--food-reward", type=float, default=15.0)
     p.add_argument("--death-penalty", type=float, default=-8.0)
-    p.add_argument("--distance-reward-toward", type=float, default=0.05)
+    p.add_argument("--distance-reward-toward", type=float, default=0.2)
     p.add_argument("--distance-penalty-away", type=float, default=-0.1)
-    p.add_argument("--survival-reward", type=float, default=0.0)
+    p.add_argument("--stagnation-penalty", type=float, default=0.0)
+    p.add_argument("--survival-reward", type=float, default=-0.003)
     p.add_argument("--idle-step-coeff", type=float, default=0.0)
-    p.add_argument("--hunger-exp-base", type=float, default=0.0)
-    p.add_argument("--hunger-exp-gamma", type=float, default=1.005)
-    p.add_argument("--hunger-exp-max", type=float, default=0.5)
-    p.add_argument("--step-limit-penalty", type=float, default=-1.0)
-    p.add_argument("--starvation-steps-factor", type=int, default=60)
-    p.add_argument("--starvation-penalty", type=float, default=-6.0)
-    p.add_argument("--wall-follow-threshold", type=int, default=10)
-    p.add_argument("--wall-follow-penalty", type=float, default=-0.04)
+    p.add_argument("--hunger-exp-base", type=float, default=0.005)
+    p.add_argument("--hunger-exp-gamma", type=float, default=1.02)
+    p.add_argument("--hunger-exp-max", type=float, default=3.0)
+    p.add_argument("--step-limit-penalty", type=float, default=-8.0)
+    p.add_argument("--starvation-steps-factor", type=int, default=55)
+    p.add_argument("--starvation-penalty", type=float, default=-5.0)
+    p.add_argument("--wall-follow-threshold", type=int, default=5)
+    p.add_argument("--wall-follow-penalty", type=float, default=-0.2)
     p.add_argument("--obstacle-count", type=int, default=0)
     p.add_argument("--moving-obstacles", action=argparse.BooleanOptionalAction, default=False)
     p.add_argument("--obstacle-move-period", type=int, default=8)
@@ -1023,7 +1086,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=True,
         help="Enable dynamic curriculum over training progress",
     )
-    p.add_argument("--curriculum-promote-streak", type=int, default=3)
+    p.add_argument("--curriculum-promote-streak", type=int, default=4)
     p.add_argument("--curriculum-prev-mix-prob", type=float, default=0.25)
 
     p.add_argument(
@@ -1032,12 +1095,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=True,
         help="Adjust entropy coefficient based on eval stability/progress",
     )
-    p.add_argument("--entropy-min", type=float, default=1e-3)
+    p.add_argument("--entropy-min", type=float, default=1.5e-3)
     p.add_argument("--entropy-max", type=float, default=2e-2)
-    p.add_argument("--entropy-up-step", type=float, default=7.5e-4)
+    p.add_argument("--entropy-up-step", type=float, default=1.2e-3)
     p.add_argument("--entropy-down-step", type=float, default=4e-4)
     p.add_argument("--entropy-plateau-patience", type=int, default=2)
-    p.add_argument("--pro-entropy-floor", type=float, default=0.0012)
+    p.add_argument("--pro-entropy-floor", type=float, default=0.0018)
     p.add_argument("--use-regression-rollback", action=argparse.BooleanOptionalAction, default=False)
 
     p.add_argument("--self-play", action=argparse.BooleanOptionalAction, default=False)
@@ -1087,6 +1150,7 @@ def main() -> None:
         death_penalty=a.death_penalty,
         distance_reward_toward=a.distance_reward_toward,
         distance_penalty_away=a.distance_penalty_away,
+        stagnation_penalty=a.stagnation_penalty,
         survival_reward=a.survival_reward,
         idle_step_coeff=a.idle_step_coeff,
         hunger_exp_base=a.hunger_exp_base,
