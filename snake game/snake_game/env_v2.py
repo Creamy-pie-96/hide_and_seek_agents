@@ -59,6 +59,7 @@ class SnakeEnv:
         moving_food: bool = False,
         food_move_prob: float = 0.15,
         food_spawn_radius: int | None = None,
+        random_start: bool = False,
         opponent_mode: str = "none",
         opponent_food_penalty: float = -2.0,
         opponent_random_prob: float = 0.15,
@@ -91,6 +92,7 @@ class SnakeEnv:
         self.moving_food = bool(moving_food)
         self.food_move_prob = float(np.clip(food_move_prob, 0.0, 1.0))
         self.food_spawn_radius = None if food_spawn_radius is None else int(food_spawn_radius)
+        self.random_start = bool(random_start)
         self.opponent_mode = str(opponent_mode)
         self.opponent_food_penalty = float(opponent_food_penalty)
         self.opponent_random_prob = float(np.clip(opponent_random_prob, 0.0, 1.0))
@@ -127,21 +129,45 @@ class SnakeEnv:
         return self.opponent_mode != "none"
 
     def reset(self) -> np.ndarray:
-        c = self.grid_size // 2
-        self.snake = deque([(c, c), (c, c - 1), (c, c - 2)])
+        if self.random_start:
+            snake, d_idx = self._sample_snake_start(length=3)
+            self.snake = deque(snake)
+            self.direction_idx = int(d_idx)
+        else:
+            c = self.grid_size // 2
+            self.snake = deque([(c, c), (c, c - 1), (c, c - 2)])
+            self.direction_idx = 1
         self.occupied = set(self.snake)
-        self.direction_idx = 1
         self.score = 0
         self.opponent_score = 0
         self.steps = 0
         self.no_food_steps = 0
-        self.visit_counts = {(c, c): 1}
+        self.visit_counts = {self.snake[0]: 1}
         self.opponent_dir_idx = 3
         self.opponent_pos = self._sample_opponent_start()
         self.wall_follow_steps = 0
         self.blocks = self._sample_blocks(self.obstacle_count)
         self.food = self._sample_food()
         return self._observation()
+
+    def _sample_snake_start(self, length: int = 3) -> tuple[list[tuple[int, int]], int]:
+        seg_len = max(2, int(length))
+        max_attempts = 200
+        for _ in range(max_attempts):
+            d_idx = int(self.rng.integers(0, 4))
+            dr, dc = self._DIRS[d_idx]
+            hr = int(self.rng.integers(0, self.grid_size))
+            hc = int(self.rng.integers(0, self.grid_size))
+            snake = [(hr - k * dr, hc - k * dc) for k in range(seg_len)]
+            if all(0 <= r < self.grid_size and 0 <= c < self.grid_size for r, c in snake):
+                return snake, d_idx
+
+        # Fallback to center start if random sampling fails.
+        c = self.grid_size // 2
+        return [(c, c), (c, c - 1), (c, c - 2)], 1
+
+    def reseed(self, seed: int | None) -> None:
+        self.rng = np.random.default_rng(seed)
 
     def _sample_blocks(self, count: int) -> set[tuple[int, int]]:
         blocks: set[tuple[int, int]] = set()

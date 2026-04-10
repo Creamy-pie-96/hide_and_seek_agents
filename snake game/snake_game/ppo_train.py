@@ -29,7 +29,7 @@ class TrainPPOConfig:
     device: str = "auto"
 
     # PPO
-    lr: float = 3e-4
+    lr: float = 4e-4
     gamma: float = 0.99
     gae_lambda: float = 0.95
     clip_coef: float = 0.2
@@ -53,9 +53,9 @@ class TrainPPOConfig:
     stagnation_penalty: float = 0.0
     survival_reward: float = -0.003
     idle_step_coeff: float = 0.0
-    hunger_exp_base: float = 0.005
+    hunger_exp_base: float = 0.003
     hunger_exp_gamma: float = 1.02
-    hunger_exp_max: float = 3.0
+    hunger_exp_max: float = 1.2
     step_limit_penalty: float = -8.0
     starvation_steps_factor: int = 55
     starvation_penalty: float = -5.0
@@ -66,11 +66,18 @@ class TrainPPOConfig:
     obstacle_move_period: int = 8
     moving_food: bool = False
     food_move_prob: float = 0.15
+    train_random_start: bool = True
+    eval_random_start: bool = True
+    obs_noise_std: float = 0.005
 
     # training strategy
     use_curriculum: bool = True
-    curriculum_promote_streak: int = 4
-    curriculum_prev_mix_prob: float = 0.25
+    curriculum_promote_streak: int = 3
+    curriculum_prev_mix_prob: float = 0.30
+    curriculum_history_mix_prob: float = 0.20
+    randomize_train_seeds: bool = True
+    reseed_every_updates: int = 12
+    reseed_span: int = 1_000_000
 
     # adaptive entropy control
     use_adaptive_entropy: bool = True
@@ -100,6 +107,7 @@ class TrainPPOConfig:
     # eval/checkpoints
     eval_every: int = 25
     eval_episodes: int = 10
+    eval_seed_batches: int = 1
     save_every: int = 100
     log_every: int = 10
 
@@ -110,15 +118,6 @@ def seed_everything(seed: int) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
-    try:
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
-    except Exception:
-        pass
-    try:
-        torch.use_deterministic_algorithms(True, warn_only=True)
-    except Exception:
-        pass
 
 
 def resolve_device(name: str) -> torch.device:
@@ -147,25 +146,25 @@ class CurriculumManager:
         self.fail_streak = 0
         self.eval_ema = 0.0
         self.eval_ema_alpha = 0.30
-        self.min_level_episodes = 160
+        self.min_level_episodes = 120
         self.demote_streak = 4
         self.demote_margin = 1.6
         self.level_entry_episode = 0
         self.min_margin_by_level = [-999.0, -999.0, -999.0, -999.0, -1.5]
         self.max_step_limit_rate_by_level = [0.85, 0.75, 0.65, 0.60, 0.55]
-        self.min_food_per_100_by_level = [0.30, 0.40, 0.50, 0.60, 0.70]
+        self.min_food_per_100_by_level = [0.10, 0.18, 0.28, 0.40, 0.55]
         self.levels = [
             {
                 "name": "solo_static_food",
-                "score_threshold": 0.55,
+                "score_threshold": 0.45,
                 "params": {
                     "opponent_mode": "none",
                     "obstacle_count": 0,
                     "moving_obstacles": False,
                     "moving_food": False,
                     "max_steps_factor": 55,
-                    "starvation_steps_factor": 52,
-                    "food_spawn_radius": 5,
+                    "starvation_steps_factor": 54,
+                    "food_spawn_radius": 6,
                     "loop_visit_penalty": -0.01,
                 },
             },
@@ -377,6 +376,7 @@ class SyncVecSnake:
                 moving_food=cfg.moving_food,
                 food_move_prob=cfg.food_move_prob,
                 food_spawn_radius=None,
+                random_start=cfg.train_random_start,
                 opponent_mode=opponent_mode,
                 opponent_food_penalty=cfg.opponent_food_penalty,
                 opponent_random_prob=cfg.opponent_heuristic_random_prob,
@@ -444,9 +444,21 @@ class SyncVecSnake:
             else:
                 e.set_curriculum(**current_params)
 
+    def apply_curriculum_params_per_env(self, params_per_env: list[dict]) -> None:
+        if len(params_per_env) != len(self.envs):
+            raise ValueError("params_per_env length must match number of envs")
+        for e, p in zip(self.envs, params_per_env):
+            e.set_curriculum(**p)
+
     def close(self) -> None:
         for e in self.envs:
             e.close()
+
+    def reseed_all(self, base_seed: int, span: int = 1_000_000) -> None:
+        s = max(1, int(span))
+        b = int(base_seed)
+        for i, e in enumerate(self.envs):
+            e.reseed(b + (i * 7919) % s)
 
 
 def compute_gae(
@@ -484,6 +496,7 @@ def evaluate(
     episodes: int,
     curriculum_params: dict | None = None,
     opponent_agent: PPOAgent | None = None,
+    seed_offset: int = 0,
 ):
     traces = []
     scores: list[int] = []
@@ -496,7 +509,7 @@ def evaluate(
     for ep in range(episodes):
         env = SnakeEnv(
             grid_size=cfg.grid_size,
-            seed=cfg.seed + 999 + ep,
+            seed=cfg.seed + 999 + int(seed_offset) * 1003 + ep,
             max_steps_factor=cfg.max_steps_factor,
             loop_visit_threshold=cfg.loop_visit_threshold,
             loop_visit_penalty=cfg.loop_visit_penalty,
@@ -521,6 +534,7 @@ def evaluate(
             moving_food=cfg.moving_food,
             food_move_prob=cfg.food_move_prob,
             food_spawn_radius=None,
+            random_start=cfg.eval_random_start,
             opponent_mode=("heuristic" if cfg.self_play and cfg.self_play_mode == "heuristic" else ("frozen" if cfg.self_play else "none")),
             opponent_food_penalty=cfg.opponent_food_penalty,
             opponent_random_prob=cfg.opponent_heuristic_random_prob,
@@ -608,6 +622,127 @@ def save_eval_replays(replay_dir: str, episode: int, picked: dict) -> None:
         path = os.path.join(replay_dir, f"eval_ep{episode:05d}_{key}.json")
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f)
+
+
+def audit_train_eval_alignment(cfg: TrainPPOConfig, curriculum_params: dict | None) -> None:
+    train_env = SnakeEnv(
+        grid_size=cfg.grid_size,
+        seed=cfg.seed + 111,
+        max_steps_factor=cfg.max_steps_factor,
+        loop_visit_threshold=cfg.loop_visit_threshold,
+        loop_visit_penalty=cfg.loop_visit_penalty,
+        food_reward=cfg.food_reward,
+        death_penalty=cfg.death_penalty,
+        distance_reward_toward=cfg.distance_reward_toward,
+        distance_penalty_away=cfg.distance_penalty_away,
+        stagnation_penalty=cfg.stagnation_penalty,
+        survival_reward=cfg.survival_reward,
+        idle_step_coeff=cfg.idle_step_coeff,
+        hunger_exp_base=cfg.hunger_exp_base,
+        hunger_exp_gamma=cfg.hunger_exp_gamma,
+        hunger_exp_max=cfg.hunger_exp_max,
+        step_limit_penalty=cfg.step_limit_penalty,
+        starvation_steps_factor=cfg.starvation_steps_factor,
+        starvation_penalty=cfg.starvation_penalty,
+        wall_follow_threshold=cfg.wall_follow_threshold,
+        wall_follow_penalty=cfg.wall_follow_penalty,
+        obstacle_count=cfg.obstacle_count,
+        moving_obstacles=cfg.moving_obstacles,
+        obstacle_move_period=cfg.obstacle_move_period,
+        moving_food=cfg.moving_food,
+        food_move_prob=cfg.food_move_prob,
+        food_spawn_radius=None,
+        random_start=cfg.train_random_start,
+        opponent_mode=("heuristic" if cfg.self_play and cfg.self_play_mode == "heuristic" else ("frozen" if cfg.self_play else "none")),
+        opponent_food_penalty=cfg.opponent_food_penalty,
+        opponent_random_prob=cfg.opponent_heuristic_random_prob,
+        terminal_win_reward=cfg.terminal_win_reward,
+        terminal_loss_penalty=cfg.terminal_loss_penalty,
+    )
+    eval_env = SnakeEnv(
+        grid_size=cfg.grid_size,
+        seed=cfg.seed + 222,
+        max_steps_factor=cfg.max_steps_factor,
+        loop_visit_threshold=cfg.loop_visit_threshold,
+        loop_visit_penalty=cfg.loop_visit_penalty,
+        food_reward=cfg.food_reward,
+        death_penalty=cfg.death_penalty,
+        distance_reward_toward=cfg.distance_reward_toward,
+        distance_penalty_away=cfg.distance_penalty_away,
+        stagnation_penalty=cfg.stagnation_penalty,
+        survival_reward=cfg.survival_reward,
+        idle_step_coeff=cfg.idle_step_coeff,
+        hunger_exp_base=cfg.hunger_exp_base,
+        hunger_exp_gamma=cfg.hunger_exp_gamma,
+        hunger_exp_max=cfg.hunger_exp_max,
+        step_limit_penalty=cfg.step_limit_penalty,
+        starvation_steps_factor=cfg.starvation_steps_factor,
+        starvation_penalty=cfg.starvation_penalty,
+        wall_follow_threshold=cfg.wall_follow_threshold,
+        wall_follow_penalty=cfg.wall_follow_penalty,
+        obstacle_count=cfg.obstacle_count,
+        moving_obstacles=cfg.moving_obstacles,
+        obstacle_move_period=cfg.obstacle_move_period,
+        moving_food=cfg.moving_food,
+        food_move_prob=cfg.food_move_prob,
+        food_spawn_radius=None,
+        random_start=cfg.eval_random_start,
+        opponent_mode=("heuristic" if cfg.self_play and cfg.self_play_mode == "heuristic" else ("frozen" if cfg.self_play else "none")),
+        opponent_food_penalty=cfg.opponent_food_penalty,
+        opponent_random_prob=cfg.opponent_heuristic_random_prob,
+        terminal_win_reward=cfg.terminal_win_reward,
+        terminal_loss_penalty=cfg.terminal_loss_penalty,
+    )
+
+    if curriculum_params:
+        train_env.set_curriculum(**curriculum_params)
+        eval_env.set_curriculum(**curriculum_params)
+
+    keys = [
+        "max_steps_factor",
+        "loop_visit_threshold",
+        "loop_visit_penalty",
+        "food_reward",
+        "death_penalty",
+        "distance_reward_toward",
+        "distance_penalty_away",
+        "stagnation_penalty",
+        "survival_reward",
+        "hunger_exp_base",
+        "hunger_exp_gamma",
+        "hunger_exp_max",
+        "step_limit_penalty",
+        "starvation_steps_factor",
+        "starvation_penalty",
+        "wall_follow_threshold",
+        "wall_follow_penalty",
+        "obstacle_count",
+        "moving_obstacles",
+        "obstacle_move_period",
+        "moving_food",
+        "food_move_prob",
+        "opponent_mode",
+        "opponent_food_penalty",
+        "opponent_random_prob",
+        "terminal_win_reward",
+        "terminal_loss_penalty",
+        "obs_channels",
+    ]
+    mismatches = [k for k in keys if getattr(train_env, k) != getattr(eval_env, k)]
+    train_obs = train_env.reset()
+    eval_obs = eval_env.reset()
+    if train_obs.shape != eval_obs.shape:
+        mismatches.append("observation_shape")
+
+    if mismatches:
+        print(f"[audit] train/eval mismatch detected: {sorted(set(mismatches))}")
+    else:
+        print("[audit] train/eval reward+state config aligned.")
+    if cfg.obs_noise_std > 0.0:
+        print(f"[audit] training-only observation noise enabled (std={cfg.obs_noise_std:.4f}); eval uses clean observations.")
+
+    train_env.close()
+    eval_env.close()
 
 
 def train(cfg: TrainPPOConfig) -> str:
@@ -719,6 +854,15 @@ def train(cfg: TrainPPOConfig) -> str:
         if os.path.exists(best_path):
             opponent_agent.load(best_path, strict=False)
 
+    def maybe_add_obs_noise(obs_in: np.ndarray) -> np.ndarray:
+        std = float(max(0.0, cfg.obs_noise_std))
+        if std <= 0.0:
+            return obs_in
+        noise = np.random.normal(loc=0.0, scale=std, size=obs_in.shape).astype(np.float32)
+        return np.clip(obs_in + noise, 0.0, 1.0).astype(np.float32)
+
+    audit_done = False
+
     with open(csv_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(
@@ -750,13 +894,31 @@ def train(cfg: TrainPPOConfig) -> str:
 
         while episodes_done < cfg.episodes:
             progress = episodes_done / max(1, cfg.episodes)
+            if cfg.randomize_train_seeds and updates % max(1, int(cfg.reseed_every_updates)) == 0:
+                seed_base = int(np.random.randint(0, max(2, int(cfg.reseed_span))))
+                vec.reseed_all(seed_base, span=cfg.reseed_span)
             if cfg.use_curriculum:
-                if curriculum.level > 0 and cfg.curriculum_prev_mix_prob > 0.0:
-                    vec.apply_curriculum_mixture(
-                        current_params=curriculum.current_params(),
-                        previous_params=curriculum.params_for_level(curriculum.level - 1),
-                        previous_prob=cfg.curriculum_prev_mix_prob,
-                    )
+                if curriculum.level > 0 and (cfg.curriculum_prev_mix_prob > 0.0 or cfg.curriculum_history_mix_prob > 0.0):
+                    p_prev = float(np.clip(cfg.curriculum_prev_mix_prob, 0.0, 1.0))
+                    p_hist = float(np.clip(cfg.curriculum_history_mix_prob, 0.0, 1.0))
+                    if p_prev + p_hist > 1.0:
+                        s = p_prev + p_hist
+                        p_prev /= s
+                        p_hist /= s
+
+                    current = curriculum.current_params()
+                    previous = curriculum.params_for_level(curriculum.level - 1)
+                    params_per_env: list[dict] = []
+                    for _ in range(cfg.n_envs):
+                        r = random.random()
+                        if r < p_hist and curriculum.level >= 1:
+                            hist_level = random.randint(0, curriculum.level - 1)
+                            params_per_env.append(curriculum.params_for_level(hist_level))
+                        elif r < (p_hist + p_prev):
+                            params_per_env.append(previous)
+                        else:
+                            params_per_env.append(current)
+                    vec.apply_curriculum_params_per_env(params_per_env)
                 else:
                     vec.apply_curriculum_params(curriculum.current_params())
 
@@ -772,7 +934,8 @@ def train(cfg: TrainPPOConfig) -> str:
 
             collected = 0
             for t in range(t_max):
-                a, lp, v = agent.act(obs, aux, deterministic=False)
+                obs_in = maybe_add_obs_noise(obs)
+                a, lp, v = agent.act(obs_in, aux, deterministic=False)
                 use_best_mask = None
                 if cfg.self_play and cfg.self_play_mode == "last_best":
                     if should_use_last_best_opponent():
@@ -787,7 +950,7 @@ def train(cfg: TrainPPOConfig) -> str:
 
                 ep_reward_acc += r
 
-                obs_buf[t] = obs
+                obs_buf[t] = obs_in
                 aux_buf[t] = aux
                 actions_buf[t] = a
                 logp_buf[t] = lp
@@ -812,7 +975,7 @@ def train(cfg: TrainPPOConfig) -> str:
                 if episodes_done >= cfg.episodes:
                     break
 
-            next_value = agent.value(obs, aux)
+            next_value = agent.value(maybe_add_obs_noise(obs), aux)
             obs_b = obs_buf[:collected]
             aux_b = aux_buf[:collected]
             actions_b = actions_buf[:collected]
@@ -852,13 +1015,36 @@ def train(cfg: TrainPPOConfig) -> str:
                 "eval_starvation_rate": "",
             }
             while episodes_done >= next_eval_episode:
-                m, picked = evaluate(
-                    agent,
-                    cfg,
-                    cfg.eval_episodes,
-                    curriculum_params=(curriculum.current_params() if cfg.use_curriculum else None),
-                    opponent_agent=(opponent_agent if should_use_last_best_opponent() else None),
-                )
+                if not audit_done:
+                    audit_train_eval_alignment(cfg, curriculum.current_params() if cfg.use_curriculum else None)
+                    audit_done = True
+                metrics_batches: list[dict] = []
+                picked = {"first": None, "best": None, "last": None}
+                batches = max(1, int(cfg.eval_seed_batches))
+                eps_per_batch = max(1, int(np.ceil(float(cfg.eval_episodes) / float(batches))))
+                for b in range(batches):
+                    mb, picked_b = evaluate(
+                        agent,
+                        cfg,
+                        eps_per_batch,
+                        curriculum_params=(curriculum.current_params() if cfg.use_curriculum else None),
+                        opponent_agent=(opponent_agent if should_use_last_best_opponent() else None),
+                        seed_offset=next_eval_episode + b * 10007,
+                    )
+                    metrics_batches.append(mb)
+                    if b == 0:
+                        picked = picked_b
+
+                m = {
+                    "eval_avg_score": float(np.mean([x["eval_avg_score"] for x in metrics_batches])),
+                    "eval_avg_reward": float(np.mean([x["eval_avg_reward"] for x in metrics_batches])),
+                    "eval_avg_steps": float(np.mean([x["eval_avg_steps"] for x in metrics_batches])),
+                    "eval_avg_margin": float(np.mean([x["eval_avg_margin"] for x in metrics_batches])),
+                    "eval_food_per_100_steps": float(np.mean([x["eval_food_per_100_steps"] for x in metrics_batches])),
+                    "eval_step_limit_rate": float(np.mean([x["eval_step_limit_rate"] for x in metrics_batches])),
+                    "eval_starvation_rate": float(np.mean([x["eval_starvation_rate"] for x in metrics_batches])),
+                    "eval_best_score": int(np.max([x["eval_best_score"] for x in metrics_batches])),
+                }
                 eval_metrics = m
                 save_eval_replays(replay_dir, next_eval_episode, picked)
 
@@ -1043,7 +1229,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out-dir", type=str, default=".", help="Output directory root")
     p.add_argument("--device", type=str, default="auto", help="auto, cpu, cuda, cuda:0, ...")
 
-    p.add_argument("--lr", type=float, default=3e-4)
+    p.add_argument("--lr", type=float, default=4e-4)
     p.add_argument("--gamma", type=float, default=0.99)
     p.add_argument("--gae-lambda", type=float, default=0.95)
     p.add_argument("--clip-coef", type=float, default=0.2)
@@ -1066,9 +1252,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--stagnation-penalty", type=float, default=0.0)
     p.add_argument("--survival-reward", type=float, default=-0.003)
     p.add_argument("--idle-step-coeff", type=float, default=0.0)
-    p.add_argument("--hunger-exp-base", type=float, default=0.005)
+    p.add_argument("--hunger-exp-base", type=float, default=0.003)
     p.add_argument("--hunger-exp-gamma", type=float, default=1.02)
-    p.add_argument("--hunger-exp-max", type=float, default=3.0)
+    p.add_argument("--hunger-exp-max", type=float, default=1.2)
     p.add_argument("--step-limit-penalty", type=float, default=-8.0)
     p.add_argument("--starvation-steps-factor", type=int, default=55)
     p.add_argument("--starvation-penalty", type=float, default=-5.0)
@@ -1079,6 +1265,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--obstacle-move-period", type=int, default=8)
     p.add_argument("--moving-food", action=argparse.BooleanOptionalAction, default=False)
     p.add_argument("--food-move-prob", type=float, default=0.15)
+    p.add_argument("--train-random-start", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument("--eval-random-start", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument("--obs-noise-std", type=float, default=0.005)
 
     p.add_argument(
         "--use-curriculum",
@@ -1086,8 +1275,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=True,
         help="Enable dynamic curriculum over training progress",
     )
-    p.add_argument("--curriculum-promote-streak", type=int, default=4)
-    p.add_argument("--curriculum-prev-mix-prob", type=float, default=0.25)
+    p.add_argument("--curriculum-promote-streak", type=int, default=3)
+    p.add_argument("--curriculum-prev-mix-prob", type=float, default=0.30)
+    p.add_argument("--curriculum-history-mix-prob", type=float, default=0.20)
+    p.add_argument("--randomize-train-seeds", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument("--reseed-every-updates", type=int, default=12)
+    p.add_argument("--reseed-span", type=int, default=1000000)
 
     p.add_argument(
         "--use-adaptive-entropy",
@@ -1118,6 +1311,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p.add_argument("--eval-every", type=int, default=25)
     p.add_argument("--eval-episodes", type=int, default=10)
+    p.add_argument("--eval-seed-batches", type=int, default=1)
     p.add_argument("--save-every", type=int, default=100)
     p.add_argument("--log-every", type=int, default=10)
     return p
@@ -1166,9 +1360,16 @@ def main() -> None:
         obstacle_move_period=a.obstacle_move_period,
         moving_food=a.moving_food,
         food_move_prob=a.food_move_prob,
+        train_random_start=a.train_random_start,
+        eval_random_start=a.eval_random_start,
+        obs_noise_std=a.obs_noise_std,
         use_curriculum=a.use_curriculum,
         curriculum_promote_streak=a.curriculum_promote_streak,
         curriculum_prev_mix_prob=a.curriculum_prev_mix_prob,
+        curriculum_history_mix_prob=a.curriculum_history_mix_prob,
+        randomize_train_seeds=a.randomize_train_seeds,
+        reseed_every_updates=a.reseed_every_updates,
+        reseed_span=a.reseed_span,
         use_adaptive_entropy=a.use_adaptive_entropy,
         entropy_min=a.entropy_min,
         entropy_max=a.entropy_max,
@@ -1190,6 +1391,7 @@ def main() -> None:
         resume_reset_optim=a.resume_reset_optim,
         eval_every=a.eval_every,
         eval_episodes=a.eval_episodes,
+        eval_seed_batches=a.eval_seed_batches,
         save_every=a.save_every,
         log_every=a.log_every,
     )
