@@ -42,6 +42,9 @@ class SnakeEnv:
         death_penalty: float = -8.0,
         distance_reward_toward: float = 0.05,
         distance_penalty_away: float = -0.1,
+        scent_reward_scale: float = 0.0,
+        scent_reward_power: float = 1.0,
+        scent_distance_gate: int = 5,
         stagnation_penalty: float = 0.0,
         survival_reward: float = 0.002,
         idle_step_coeff: float = 0.0,
@@ -58,6 +61,7 @@ class SnakeEnv:
         obstacle_move_period: int = 8,
         moving_food: bool = False,
         food_move_prob: float = 0.15,
+        food_centered_observation: bool = False,
         food_spawn_radius: int | None = None,
         random_start: bool = False,
         opponent_mode: str = "none",
@@ -75,6 +79,9 @@ class SnakeEnv:
         self.death_penalty = float(death_penalty)
         self.distance_reward_toward = float(distance_reward_toward)
         self.distance_penalty_away = float(distance_penalty_away)
+        self.scent_reward_scale = float(max(0.0, scent_reward_scale))
+        self.scent_reward_power = float(max(0.5, scent_reward_power))
+        self.scent_distance_gate = max(1, int(scent_distance_gate))
         self.stagnation_penalty = float(stagnation_penalty)
         self.survival_reward = float(survival_reward)
         self.idle_step_coeff = float(idle_step_coeff)
@@ -91,6 +98,7 @@ class SnakeEnv:
         self.obstacle_move_period = max(1, int(obstacle_move_period))
         self.moving_food = bool(moving_food)
         self.food_move_prob = float(np.clip(food_move_prob, 0.0, 1.0))
+        self.food_centered_observation = bool(food_centered_observation)
         self.food_spawn_radius = None if food_spawn_radius is None else int(food_spawn_radius)
         self.random_start = bool(random_start)
         self.opponent_mode = str(opponent_mode)
@@ -409,6 +417,11 @@ class SnakeEnv:
             else:
                 reward += self.stagnation_penalty
 
+            if self.scent_reward_scale > 0.0 and after_dist < self.scent_distance_gate:
+                direction = float(np.sign(float(before_dist - after_dist)))
+                scent_mag = float(self.scent_reward_scale / ((float(after_dist) + 1.0) ** float(self.scent_reward_power)))
+                reward += direction * scent_mag
+
             count = self.visit_counts.get(new_head, 0) + 1
             self.visit_counts[new_head] = count
             if count >= self.loop_visit_threshold:
@@ -490,7 +503,41 @@ class SnakeEnv:
             obs[head_r, head_c, 3] = 1.0
             for r, c in self.blocks:
                 obs[r, c, 4] = 1.0
+        if self.food_centered_observation:
+            center = self.grid_size // 2
+            shift_r = int(center - self.food[0])
+            shift_c = int(center - self.food[1])
+            obs = np.roll(obs, shift=shift_r, axis=0)
+            obs = np.roll(obs, shift=shift_c, axis=1)
         return obs
+
+    def valid_action_mask(self, who: str = "player") -> np.ndarray:
+        """Return safe relative-action mask [straight, right, left] as float32 in {0,1}."""
+        if who == "player":
+            head_r, head_c = self.snake[0]
+            d_idx = self.direction_idx
+        else:
+            head_r, head_c = self.opponent_pos
+            d_idx = self.opponent_dir_idx
+
+        mask = np.ones((3,), dtype=np.float32)
+        for rel in (0, 1, 2):
+            abs_dir = self._relative_to_abs_dir(d_idx, rel)
+            dr, dc = self._DIRS[abs_dir]
+            nr, nc = head_r + dr, head_c + dc
+            blocked = (
+                not (0 <= nr < self.grid_size and 0 <= nc < self.grid_size)
+                or (nr, nc) in self.blocks
+                or (nr, nc) in self.occupied
+            )
+            if who == "player" and self.has_opponent and (nr, nc) == self.opponent_pos:
+                blocked = True
+            if blocked:
+                mask[rel] = 0.0
+
+        if float(mask.sum()) <= 0.0:
+            mask[:] = 1.0
+        return mask
 
     def aux_features(self, who: str = "player") -> np.ndarray:
         if who == "player":
@@ -525,6 +572,13 @@ class SnakeEnv:
             return 0.0
 
         fr, fc = self.food
+        dy = float(fr - head_r)
+        dx = float(fc - head_c)
+        manhattan = abs(dy) + abs(dx)
+        norm = float(max(1, self.grid_size - 1))
+        scent_dx = float(dx / norm)
+        scent_dy = float(dy / norm)
+        scent_intensity = float(1.0 / (manhattan + 1.0))
         food_up = 1.0 if fr < head_r else 0.0
         food_down = 1.0 if fr > head_r else 0.0
         food_right = 1.0 if fc > head_c else 0.0
@@ -542,6 +596,9 @@ class SnakeEnv:
                 food_down,
                 food_right,
                 food_left,
+                scent_dx,
+                scent_dy,
+                scent_intensity,
                 dirs[0],
                 dirs[1],
                 dirs[2],
@@ -560,8 +617,12 @@ class SnakeEnv:
         self,
         *,
         max_steps_factor: int | None = None,
+        food_reward: float | None = None,
         distance_reward_toward: float | None = None,
         distance_penalty_away: float | None = None,
+        scent_reward_scale: float | None = None,
+        scent_reward_power: float | None = None,
+        scent_distance_gate: int | None = None,
         stagnation_penalty: float | None = None,
         loop_visit_penalty: float | None = None,
         step_limit_penalty: float | None = None,
@@ -569,11 +630,15 @@ class SnakeEnv:
         starvation_penalty: float | None = None,
         wall_follow_threshold: int | None = None,
         wall_follow_penalty: float | None = None,
+        hunger_exp_base: float | None = None,
+        hunger_exp_gamma: float | None = None,
+        hunger_exp_max: float | None = None,
         obstacle_count: int | None = None,
         moving_obstacles: bool | None = None,
         obstacle_move_period: int | None = None,
         moving_food: bool | None = None,
         food_move_prob: float | None = None,
+        food_centered_observation: bool | None = None,
         opponent_mode: str | None = None,
         food_spawn_radius: int | None = None,
         opponent_food_penalty: float | None = None,
@@ -583,10 +648,18 @@ class SnakeEnv:
     ) -> None:
         if max_steps_factor is not None:
             self.max_steps_factor = int(max_steps_factor)
+        if food_reward is not None:
+            self.food_reward = float(food_reward)
         if distance_reward_toward is not None:
             self.distance_reward_toward = float(distance_reward_toward)
         if distance_penalty_away is not None:
             self.distance_penalty_away = float(distance_penalty_away)
+        if scent_reward_scale is not None:
+            self.scent_reward_scale = float(max(0.0, scent_reward_scale))
+        if scent_reward_power is not None:
+            self.scent_reward_power = float(max(0.5, scent_reward_power))
+        if scent_distance_gate is not None:
+            self.scent_distance_gate = max(1, int(scent_distance_gate))
         if stagnation_penalty is not None:
             self.stagnation_penalty = float(stagnation_penalty)
         if loop_visit_penalty is not None:
@@ -597,6 +670,12 @@ class SnakeEnv:
             self.starvation_steps_factor = max(1, int(starvation_steps_factor))
         if starvation_penalty is not None:
             self.starvation_penalty = float(starvation_penalty)
+        if hunger_exp_base is not None:
+            self.hunger_exp_base = float(hunger_exp_base)
+        if hunger_exp_gamma is not None:
+            self.hunger_exp_gamma = float(hunger_exp_gamma)
+        if hunger_exp_max is not None:
+            self.hunger_exp_max = float(hunger_exp_max)
         if wall_follow_threshold is not None:
             self.wall_follow_threshold = max(1, int(wall_follow_threshold))
         if wall_follow_penalty is not None:
@@ -612,6 +691,8 @@ class SnakeEnv:
             self.moving_food = bool(moving_food)
         if food_move_prob is not None:
             self.food_move_prob = float(np.clip(food_move_prob, 0.0, 1.0))
+        if food_centered_observation is not None:
+            self.food_centered_observation = bool(food_centered_observation)
         if opponent_mode is not None:
             self.opponent_mode = str(opponent_mode)
         if opponent_food_penalty is not None:
@@ -625,6 +706,8 @@ class SnakeEnv:
         self.food_spawn_radius = None if food_spawn_radius is None else int(food_spawn_radius)
 
     def _info(self, reason: str) -> dict:
+        head_r, head_c = self.snake[0]
+        food_r, food_c = self.food
         info = StepInfo(
             score=self.score,
             opponent_score=self.opponent_score,
@@ -632,7 +715,25 @@ class SnakeEnv:
             steps=self.steps,
             reason=reason,
         )
-        return info.__dict__
+        payload = dict(info.__dict__)
+        payload.update(
+            {
+                "head_r": int(head_r),
+                "head_c": int(head_c),
+                "food_r": int(food_r),
+                "food_c": int(food_c),
+                "food_dist": int(abs(head_r - food_r) + abs(head_c - food_c)),
+                "on_border": bool(
+                    head_r == 0
+                    or head_r == self.grid_size - 1
+                    or head_c == 0
+                    or head_c == self.grid_size - 1
+                ),
+                "wall_follow_steps": int(self.wall_follow_steps),
+                "no_food_steps": int(self.no_food_steps),
+            }
+        )
+        return payload
 
     def render(self, fps: int = 12) -> None:
         import pygame

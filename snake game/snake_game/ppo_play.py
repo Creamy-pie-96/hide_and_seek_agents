@@ -37,6 +37,7 @@ def run(
     starvation_penalty: float = -6.0,
     wall_follow_threshold: int = 6,
     wall_follow_penalty: float = -0.12,
+    curriculum: bool = False,
 ) -> None:
     dev = torch.device("cuda" if device == "auto" and torch.cuda.is_available() else device)
 
@@ -66,7 +67,15 @@ def run(
     else:
         print("Checkpoint not found. Running with random-initialized model.")
 
-    for ep in range(1, episodes + 1):
+    level_specs = [
+        (0, {"opponent_mode": "none", "obstacle_count": 0, "moving_obstacles": False, "moving_food": False}),
+        (1, {"opponent_mode": "none", "obstacle_count": 6, "moving_obstacles": False, "moving_food": False}),
+        (2, {"opponent_mode": "none", "obstacle_count": 8, "moving_obstacles": True, "obstacle_move_period": 10, "moving_food": False}),
+        (3, {"opponent_mode": "none", "obstacle_count": 10, "moving_obstacles": True, "obstacle_move_period": 9, "moving_food": True, "food_move_prob": 0.08}),
+        (4, {"opponent_mode": "heuristic", "obstacle_count": 10, "moving_obstacles": True, "obstacle_move_period": 7, "moving_food": True, "food_move_prob": 0.10, "opponent_food_penalty": -0.10, "opponent_random_prob": 0.80}),
+    ]
+
+    def run_one_episode(global_ep: int, level_tag: str) -> None:
         s = env.reset()
         total_r = 0.0
         for t in range(max_steps):
@@ -77,11 +86,22 @@ def run(
             total_r += r
             if done or truncated:
                 print(
-                    f"[play ep {ep}] steps={t+1} score={info['score']} "
+                    f"[play {level_tag} ep {global_ep}] steps={t+1} score={info['score']} "
                     f"length={info['length']} reward={total_r:.2f} reason={info['reason']}"
                 )
                 break
         time.sleep(0.3)
+
+    if curriculum:
+        print("Curriculum play mode: running each level from 0 to 4")
+        for level, params in level_specs:
+            env.set_curriculum(**params)
+            print(f"\n=== Level {level} ===")
+            for ep in range(1, episodes + 1):
+                run_one_episode(ep, f"L{level}")
+    else:
+        for ep in range(1, episodes + 1):
+            run_one_episode(ep, "single")
 
     env.close()
 
@@ -117,6 +137,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--starvation-penalty", type=float, default=-6.0)
     p.add_argument("--wall-follow-threshold", type=int, default=6)
     p.add_argument("--wall-follow-penalty", type=float, default=-0.12)
+    p.add_argument("--curriculum", action="store_true", help="Play each curriculum level sequentially; runs --episodes at every level")
     return p
 
 
@@ -144,6 +165,7 @@ def main() -> None:
         starvation_penalty=a.starvation_penalty,
         wall_follow_threshold=a.wall_follow_threshold,
         wall_follow_penalty=a.wall_follow_penalty,
+        curriculum=a.curriculum,
     )
 
 

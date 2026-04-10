@@ -1,0 +1,12 @@
+[ep   15] updates=   1 steps=    4096 score(avg200)=0.267 reward(avg200)=2.407 pi=-0.0002 v=4.0918 ent=1.0398 ent_coef=0.0060 sps=1113.6 elapsed=3.7s
+[audit] train/eval reward+state config aligned.
+[audit] training-only observation noise enabled (std=0.0050); eval uses clean observations.
+[ep  130] updates=   7 steps=   28672 score(avg200)=0.785 reward(avg200)=8.166 pi=-0.0000 v=11.3572 ent=0.9510 ent_coef=0.0055 sps=1037.9 elapsed=27.4s
+[ep  410] updates=  21 steps=   86016 score(avg200)=0.870 reward(avg200)=9.478 pi=-0.0009 v=8.7416 ent=0.9766 ent_coef=0.0040 sps=1187.0 elapsed=75.7s
+[ep  430] updates=  22 steps=   90112 score(avg200)=0.870 reward(avg200)=9.428 pi=-0.0014 v=4.5575 ent=0.9924 ent_coef=0.0039 sps=1090.1 elapsed=79.4s
+[ep  530] updates=  27 steps=  110592 score(avg200)=0.995 reward(avg200)=10.329 pi=0.0010 v=12.8355 ent=0.9707 ent_coef=0.0033 sps=1207.0 elapsed=96.4s
+[ep  640] updates=  33 steps=  135168 score(avg200)=1.130 reward(avg200)=12.598 pi=-0.0004 v=8.8691 ent=0.9789 ent_coef=0.0027 sps=1386.7 elapsed=114.1s
+[ep 1000] updates=  53 steps=  214704 score(avg200)=1.190 reward(avg200)=13.937 pi=-0.0034 v=7.9572 ent=0.9674 ent_coef=0.0020 sps=1279.0 elapsed=176.3s
+Training complete. Final checkpoint: /home/DATA/CODE/code/hide_and_seek/snake game/checkpoints/final.pt
+Metrics CSV: /home/DATA/CODE/code/hide_and_seek/snake game/logs/train_ppo_20260410_084425.csv
+Eval replays directory: /home/DATA/CODE/code/hide_and_seek/snake game/replays

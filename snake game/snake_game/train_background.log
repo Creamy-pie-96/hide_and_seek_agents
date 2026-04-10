@@ -1,0 +1,4 @@
+Traceback (most recent call last):
+  File "/home/DATA/CODE/code/hide_and_seek/snake game/snake_game/ppo_train.py", line 16, in <module>
+    from .env_v2 import SnakeEnv
+ImportError: attempted relative import with no known parent package

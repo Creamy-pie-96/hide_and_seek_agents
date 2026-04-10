@@ -25,7 +25,7 @@ class PPOConfig:
     n_envs: int = 8
     update_epochs: int = 4
     minibatch_size: int = 512
-    aux_dim: int = 11
+    aux_dim: int = 14
     obs_channels: int = 3
 
 
@@ -49,7 +49,53 @@ class PPOAgent:
         invalid = aux[:, :3] > 0.5  # [B,3]: danger_front/right/left
         all_invalid = invalid.all(dim=1, keepdim=True)
         invalid = invalid & (~all_invalid)
-        return logits.masked_fill(invalid, -1e9)
+        masked = logits.masked_fill(invalid, -1e9)
+
+        # Food-direction action guidance (mask only near food to avoid over-constraining exploration).
+        if aux.shape[-1] < 14:
+            return masked
+
+        food_up = aux[:, 3] > 0.5
+        food_down = aux[:, 4] > 0.5
+        food_right = aux[:, 5] > 0.5
+        food_left = aux[:, 6] > 0.5
+        scent_intensity = aux[:, 9]  # 1 / (manhattan + 1)
+        heading = torch.argmax(aux[:, 10:14], dim=1)  # 0=up,1=right,2=down,3=left
+
+        # Preferred absolute directions toward food.
+        pref_abs = torch.zeros((aux.shape[0], 4), dtype=torch.bool, device=aux.device)
+        pref_abs[:, 0] = food_up
+        pref_abs[:, 1] = food_right
+        pref_abs[:, 2] = food_down
+        pref_abs[:, 3] = food_left
+
+        rel_pref = torch.zeros((aux.shape[0], 3), dtype=torch.bool, device=aux.device)
+        for rel_action in range(3):
+            abs_dir = (heading + (1 if rel_action == 1 else (-1 if rel_action == 2 else 0))) % 4
+            rel_pref[:, rel_action] = pref_abs.gather(1, abs_dir.unsqueeze(1)).squeeze(1)
+
+        safe = ~invalid
+        near_food = scent_intensity >= 0.20  # dist <= 4
+        preferred_safe = rel_pref & safe
+        preferred_safe_count = preferred_safe.sum(dim=1)
+
+        # Hard-mask to the single preferred safe action in close-range strike zone.
+        force_strike = near_food & (preferred_safe_count == 1)
+        if torch.any(force_strike):
+            strike_mask = safe.clone()
+            strike_mask[force_strike] = ~preferred_safe[force_strike]
+            all_invalid_strike = strike_mask.all(dim=1, keepdim=True)
+            strike_mask = strike_mask & (~all_invalid_strike)
+            masked = masked.masked_fill(strike_mask, -1e9)
+
+        # Mild bias toward preferred safe actions when food is moderately near.
+        mid_food = (scent_intensity >= 0.12) & (preferred_safe_count >= 1)
+        if torch.any(mid_food):
+            bias = torch.zeros_like(masked)
+            bias[mid_food] = preferred_safe[mid_food].float() * 0.25
+            masked = masked + bias
+
+        return masked
 
     @torch.no_grad()
     def act(self, obs: np.ndarray, aux: np.ndarray | None = None, deterministic: bool = False):
